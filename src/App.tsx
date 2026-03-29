@@ -69,6 +69,7 @@ interface Subscription {
 
 // --- Constants ---
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
+  'Transfer': ['direct debit', 'payment received', 'amex', 'american express', 'barclaycard', 'credit card', 'transfer'],
   'Groceries': ['tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'co-op', 'coop', '7 11', 'waitrose', 'marks & spencer', 'm&s'],
   'Transport': ['uber', 'bolt', 'tfl', 'grab', 'fuel', 'petrol', 'trainline', 'eurostar', 'shell', 'bp'],
   'Eating Out': ['wetherspoon', 'nandos', 'starbucks', 'costa', 'mcdonalds', 'subway', 'restaurant', 'bar', 'pub', 'deliveroo', 'just eat', 'uber eats'],
@@ -171,6 +172,7 @@ export default function App() {
   const [selectedBank, setSelectedBank] = useState<BankType>('Barclaycard');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedMonth, setSelectedMonth] = useState<string>('all'); // Format: YYYY-MM
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
 
   // Load from localStorage
@@ -273,13 +275,34 @@ export default function App() {
     if (confirm("Are you sure you want to clear all transaction data?")) {
       setAllTransactions([]);
       localStorage.removeItem('transactions');
+      setSelectedMonth('all');
     }
   };
 
   // --- Derived Data ---
+
+  const availableMonths = useMemo(() => {
+    const months = new Set<string>();
+    allTransactions.forEach(t => {
+      const [d, m, y] = t.date.split('/');
+      months.add(`${y}-${m}`);
+    });
+    return Array.from(months).sort().reverse();
+  }, [allTransactions]);
   
   const filteredTransactions = useMemo(() => {
-    let result = allTransactions.filter(t => 
+    let result = allTransactions;
+
+    // Month filter
+    if (selectedMonth !== 'all') {
+      result = result.filter(t => {
+        const [d, m, y] = t.date.split('/');
+        return `${y}-${m}` === selectedMonth;
+      });
+    }
+
+    // Search filter
+    result = result.filter(t => 
       t.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.category.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.bank.toLowerCase().includes(searchTerm.toLowerCase())
@@ -302,21 +325,25 @@ export default function App() {
     });
 
     return result;
-  }, [allTransactions, searchTerm, sortConfig]);
+  }, [allTransactions, searchTerm, sortConfig, selectedMonth]);
 
   const stats = useMemo(() => {
-    const totalSpent = allTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + t.amount, 0);
-    const totalIncome = allTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+    // Use filtered transactions for stats to respect month filter
+    const nonTransferTransactions = filteredTransactions.filter(t => t.category !== 'Transfer');
+    
+    const totalSpent = nonTransferTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + t.amount, 0);
+    const totalIncome = nonTransferTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
     return {
       spent: Math.abs(totalSpent),
       income: totalIncome,
       net: totalIncome + totalSpent,
-      count: allTransactions.length
+      count: filteredTransactions.length
     };
-  }, [allTransactions]);
+  }, [filteredTransactions]);
 
   const categoryChartData = useMemo(() => {
-    const spending = allTransactions.filter(t => t.amount < 0);
+    // Use filtered transactions for chart to respect month filter
+    const spending = filteredTransactions.filter(t => t.amount < 0 && t.category !== 'Transfer');
     const catTotals: Record<string, number> = {};
     spending.forEach(t => {
       catTotals[t.category] = (catTotals[t.category] || 0) + Math.abs(t.amount);
@@ -344,12 +371,12 @@ export default function App() {
         borderWidth: 0,
       }]
     };
-  }, [allTransactions]);
+  }, [filteredTransactions]);
 
   const trendChartData = useMemo(() => {
     const monthTotals: Record<string, number> = {};
     allTransactions.forEach(t => {
-      if (t.amount >= 0) return;
+      if (t.amount >= 0 || t.category === 'Transfer') return;
       const [d, m, y] = t.date.split('/');
       const key = `${y}-${m}`;
       monthTotals[key] = (monthTotals[key] || 0) + Math.abs(t.amount);
@@ -380,6 +407,12 @@ export default function App() {
     return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(val);
   };
 
+  const formatMonthKey = (key: string) => {
+    if (key === 'all') return 'All Time';
+    const [y, m] = key.split('-');
+    return new Date(parseInt(y), parseInt(m) - 1).toLocaleString('default', { month: 'long', year: 'numeric' });
+  };
+
   return (
     <div className="min-h-screen bg-[#121212] text-white font-sans p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-8">
@@ -401,44 +434,74 @@ export default function App() {
           </div>
         </header>
 
-        {/* Upload Section */}
-        <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
-          <div className="flex flex-col md:flex-row items-end gap-6">
-            <div className="w-full md:w-64 space-y-2">
-              <label className="text-sm font-medium text-gray-400">Select Bank Format</label>
-              <select 
-                value={selectedBank}
-                onChange={(e) => setSelectedBank(e.target.value as BankType)}
-                className="w-full bg-[#2a2a2a] border border-gray-700 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              >
-                {BANK_FORMATS.map(bank => (
-                  <option key={bank} value={bank}>{bank}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex-1 w-full space-y-2">
-              <label className="text-sm font-medium text-gray-400">Upload CSV File</label>
-              <div className="relative">
-                <input 
-                  type="file" 
-                  accept=".csv"
-                  onChange={handleFileUpload}
-                  className="hidden" 
-                  id="csv-upload"
-                />
-                <label 
-                  htmlFor="csv-upload"
-                  className="flex items-center justify-center gap-3 w-full bg-[#2a2a2a] border-2 border-dashed border-gray-700 rounded-lg px-6 py-8 cursor-pointer hover:border-indigo-500 hover:bg-[#333] transition-all group"
+        {/* Month Filter & Upload Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <section className="lg:col-span-2 bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
+            <div className="flex flex-col md:flex-row items-end gap-6">
+              <div className="w-full md:w-64 space-y-2">
+                <label className="text-sm font-medium text-gray-400">Select Bank Format</label>
+                <select 
+                  value={selectedBank}
+                  onChange={(e) => setSelectedBank(e.target.value as BankType)}
+                  className="w-full bg-[#2a2a2a] border border-gray-700 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 >
-                  <Upload className="text-gray-500 group-hover:text-indigo-400" />
-                  <span className="text-gray-400 group-hover:text-gray-200">
-                    {isAnalyzing ? "Processing..." : "Click to upload or drag and drop"}
-                  </span>
-                </label>
+                  {BANK_FORMATS.map(bank => (
+                    <option key={bank} value={bank}>{bank}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex-1 w-full space-y-2">
+                <label className="text-sm font-medium text-gray-400">Upload CSV File</label>
+                <div className="relative">
+                  <input 
+                    type="file" 
+                    accept=".csv"
+                    onChange={handleFileUpload}
+                    className="hidden" 
+                    id="csv-upload"
+                  />
+                  <label 
+                    htmlFor="csv-upload"
+                    className="flex items-center justify-center gap-3 w-full bg-[#2a2a2a] border-2 border-dashed border-gray-700 rounded-lg px-6 py-8 cursor-pointer hover:border-indigo-500 hover:bg-[#333] transition-all group"
+                  >
+                    <Upload className="text-gray-500 group-hover:text-indigo-400" />
+                    <span className="text-gray-400 group-hover:text-gray-200">
+                      {isAnalyzing ? "Processing..." : "Click to upload or drag and drop"}
+                    </span>
+                  </label>
+                </div>
               </div>
             </div>
-          </div>
-        </section>
+          </section>
+
+          {/* Month Selector */}
+          <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
+            <label className="text-sm font-medium text-gray-400 block mb-4">Viewing Period</label>
+            <div className="space-y-2 max-h-[140px] overflow-y-auto pr-2 custom-scrollbar">
+              <button 
+                onClick={() => setSelectedMonth('all')}
+                className={cn(
+                  "w-full text-left px-4 py-2 rounded-lg transition-colors text-sm",
+                  selectedMonth === 'all' ? "bg-indigo-600 text-white" : "bg-[#2a2a2a] text-gray-400 hover:bg-[#333]"
+                )}
+              >
+                All Time
+              </button>
+              {availableMonths.map(month => (
+                <button 
+                  key={month}
+                  onClick={() => setSelectedMonth(month)}
+                  className={cn(
+                    "w-full text-left px-4 py-2 rounded-lg transition-colors text-sm",
+                    selectedMonth === month ? "bg-indigo-600 text-white" : "bg-[#2a2a2a] text-gray-400 hover:bg-[#333]"
+                  )}
+                >
+                  {formatMonthKey(month)}
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
 
         {/* Summary Cards */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -480,7 +543,7 @@ export default function App() {
             <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl">
               <div className="flex items-center gap-2 mb-6">
                 <PieChart size={18} className="text-indigo-400" />
-                <h2 className="text-lg font-semibold">Spending by Category</h2>
+                <h2 className="text-lg font-semibold">Spending by Category {selectedMonth !== 'all' && `(${formatMonthKey(selectedMonth)})`}</h2>
               </div>
               <div className="h-[300px] flex justify-center">
                 <Doughnut 
@@ -497,25 +560,43 @@ export default function App() {
                 />
               </div>
             </div>
-            <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl">
-              <div className="flex items-center gap-2 mb-6">
-                <BarChart3 size={18} className="text-indigo-400" />
-                <h2 className="text-lg font-semibold">Monthly Trend</h2>
+            {selectedMonth === 'all' ? (
+              <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl">
+                <div className="flex items-center gap-2 mb-6">
+                  <BarChart3 size={18} className="text-indigo-400" />
+                  <h2 className="text-lg font-semibold">Monthly Trend</h2>
+                </div>
+                <div className="h-[300px]">
+                  <Bar 
+                    data={trendChartData}
+                    options={{
+                      maintainAspectRatio: false,
+                      scales: {
+                        y: { grid: { color: '#2a2a2a' }, ticks: { color: '#9ca3af' } },
+                        x: { grid: { display: false }, ticks: { color: '#9ca3af' } }
+                      },
+                      plugins: { legend: { display: false } }
+                    }}
+                  />
+                </div>
               </div>
-              <div className="h-[300px]">
-                <Bar 
-                  data={trendChartData}
-                  options={{
-                    maintainAspectRatio: false,
-                    scales: {
-                      y: { grid: { color: '#2a2a2a' }, ticks: { color: '#9ca3af' } },
-                      x: { grid: { display: false }, ticks: { color: '#9ca3af' } }
-                    },
-                    plugins: { legend: { display: false } }
-                  }}
-                />
+            ) : (
+              <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl flex flex-col items-center justify-center text-center space-y-4">
+                <Calendar size={48} className="text-gray-700" />
+                <div>
+                  <h3 className="text-lg font-medium text-gray-300">Viewing {formatMonthKey(selectedMonth)}</h3>
+                  <p className="text-sm text-gray-500 max-w-xs mx-auto">
+                    The summary and category breakdown above are now filtered to this specific month.
+                  </p>
+                </div>
+                <button 
+                  onClick={() => setSelectedMonth('all')}
+                  className="text-indigo-400 text-sm hover:underline"
+                >
+                  Back to All Time Trend
+                </button>
               </div>
-            </div>
+            )}
           </section>
         )}
 
