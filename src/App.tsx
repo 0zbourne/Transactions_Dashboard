@@ -134,6 +134,17 @@ interface Transaction {
   bank: 'Barclaycard' | 'Amex' | 'Starling';
 }
 
+interface UploadLog {
+  id: string;
+  bank: string;
+  fileName: string;
+  transactionCount: number;
+  uploadedAt: any;
+  periodStart?: string;
+  periodEnd?: string;
+  uid: string;
+}
+
 interface Subscription {
   merchant: string;
   frequency: string;
@@ -256,6 +267,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
 
 export default function App() {
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
+  const [uploadLogs, setUploadLogs] = useState<UploadLog[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [selectedBank, setSelectedBank] = useState<BankType>('Barclaycard');
@@ -263,6 +275,7 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedMonth, setSelectedMonth] = useState<string>('all'); // Format: YYYY-MM
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
+  const [showHistory, setShowHistory] = useState(false);
 
   // Auth Listener
   useEffect(() => {
@@ -306,7 +319,26 @@ export default function App() {
       handleFirestoreError(error, OperationType.GET, `users/${user.uid}/transactions`);
     });
 
-    return () => unsubscribe();
+    // Sync Upload Logs
+    const logsQ = query(
+      collection(db, `users/${user.uid}/upload_logs`),
+      orderBy('uploadedAt', 'desc')
+    );
+
+    const unsubscribeLogs = onSnapshot(logsQ, (snapshot) => {
+      const logs: UploadLog[] = [];
+      snapshot.forEach((doc) => {
+        logs.push({ id: doc.id, ...doc.data() } as UploadLog);
+      });
+      setUploadLogs(logs);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, `users/${user.uid}/upload_logs`);
+    });
+
+    return () => {
+      unsubscribe();
+      unsubscribeLogs();
+    };
   }, [user]);
 
   const handleLogin = async () => {
@@ -391,6 +423,31 @@ export default function App() {
               uid: user.uid,
               createdAt: serverTimestamp()
             }, { merge: true });
+          });
+          
+          // Add Upload Log
+          const logId = `log-${Date.now()}`;
+          const logRef = doc(db, `users/${user.uid}/upload_logs`, logId);
+          
+          // Detect period
+          let minDate = Infinity;
+          let maxDate = -Infinity;
+          parsedTxs.forEach(tx => {
+            const [d, m, y] = tx.date.split('/').map(Number);
+            const time = new Date(y, m - 1, d).getTime();
+            if (time < minDate) minDate = time;
+            if (time > maxDate) maxDate = time;
+          });
+
+          batch.set(logRef, {
+            id: logId,
+            bank: selectedBank,
+            fileName: file.name,
+            transactionCount: parsedTxs.length,
+            uploadedAt: serverTimestamp(),
+            periodStart: minDate !== Infinity ? new Date(minDate).toISOString() : null,
+            periodEnd: maxDate !== -Infinity ? new Date(maxDate).toISOString() : null,
+            uid: user.uid
           });
           
           try {
@@ -562,6 +619,48 @@ export default function App() {
 
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
+  const coverageData = useMemo(() => {
+    const coverage: Record<string, Set<string>> = {
+      'Barclaycard': new Set(),
+      'Amex': new Set(),
+      'Starling': new Set()
+    };
+    
+    allTransactions.forEach(t => {
+      const [d, m, y] = t.date.split('/');
+      const key = `${y}-${m}`;
+      if (coverage[t.bank]) {
+        coverage[t.bank].add(key);
+      }
+    });
+    
+    return coverage;
+  }, [allTransactions]);
+
+  const last12Months = useMemo(() => {
+    const months = [];
+    const now = new Date();
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const y = d.getFullYear();
+      const m = (d.getMonth() + 1).toString().padStart(2, '0');
+      months.push(`${y}-${m}`);
+    }
+    return months;
+  }, []);
+
+  const handleDeleteLog = async (logId: string) => {
+    if (confirm("Are you sure you want to delete this upload log? This will NOT delete the transactions (to prevent data loss if they were also in other files).")) {
+      if (user) {
+        try {
+          await deleteDoc(doc(db, `users/${user.uid}/upload_logs`, logId));
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/upload_logs`);
+        }
+      }
+    }
+  };
+
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(val);
   };
@@ -591,6 +690,16 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setShowHistory(!showHistory)}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 border rounded-lg transition-colors",
+                showHistory ? "bg-indigo-600 border-indigo-500 text-white" : "bg-[#2a2a2a] border-gray-700 text-gray-300 hover:bg-[#333]"
+              )}
+            >
+              <RefreshCcw size={18} className={cn(showHistory && "animate-spin-once")} />
+              <span>{showHistory ? "Hide History" : "Show History"}</span>
+            </button>
             {isAuthReady && (
               user ? (
                 <div className="flex items-center gap-3">
@@ -725,6 +834,122 @@ export default function App() {
             <p className="text-2xl font-bold">{stats.count}</p>
           </div>
         </section>
+
+        {/* History & Coverage Section */}
+        {showHistory && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in slide-in-from-top-4 duration-500">
+            {/* Coverage Map */}
+            <section className="lg:col-span-2 bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
+              <div className="flex items-center gap-2 mb-6">
+                <TableIcon size={18} className="text-indigo-400" />
+                <h2 className="text-lg font-semibold">Data Coverage Map</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="text-xs text-gray-500 uppercase tracking-wider">
+                      <th className="pb-4 pr-4">Provider</th>
+                      {last12Months.map(m => (
+                        <th key={m} className="pb-4 px-2 text-center">
+                          {new Date(parseInt(m.split('-')[0]), parseInt(m.split('-')[1]) - 1).toLocaleString('default', { month: 'short' })}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800">
+                    {BANK_FORMATS.map(bank => (
+                      <tr key={bank} className="group">
+                        <td className="py-4 pr-4 font-medium text-sm">{bank}</td>
+                        {last12Months.map(month => {
+                          const hasData = coverageData[bank].has(month);
+                          return (
+                            <td key={month} className="py-4 px-2">
+                              <button 
+                                onClick={() => setSelectedMonth(month)}
+                                className={cn(
+                                  "h-6 w-full rounded-md transition-all duration-300 cursor-pointer",
+                                  hasData 
+                                    ? "bg-indigo-600/40 border border-indigo-500/50 shadow-[0_0_10px_rgba(99,102,241,0.2)] hover:bg-indigo-600/60" 
+                                    : "bg-gray-800/30 border border-gray-800/50 hover:bg-gray-800/50"
+                                )}
+                                title={`${bank} - ${formatMonthKey(month)}: ${hasData ? 'Data Present' : 'Missing'}`}
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-4 text-xs text-gray-500">
+                  <div className="flex items-center gap-1.5">
+                    <div className="h-3 w-3 rounded bg-indigo-600/40 border border-indigo-500/50" />
+                    <span>Data Present</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="h-3 w-3 rounded bg-gray-800/30 border border-gray-800/50" />
+                    <span>Missing Data</span>
+                  </div>
+                </div>
+                {last12Months.some(m => BANK_FORMATS.some(b => !coverageData[b].has(m))) && (
+                  <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-900/10 px-3 py-1.5 rounded-lg border border-amber-900/20">
+                    <AlertCircle size={14} />
+                    <span>You have gaps in your statement history. Upload missing CSVs to complete your dashboard.</span>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Upload Log */}
+            <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6 flex flex-col">
+              <div className="flex items-center gap-2 mb-6">
+                <RefreshCcw size={18} className="text-indigo-400" />
+                <h2 className="text-lg font-semibold">Upload History</h2>
+              </div>
+              <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar">
+                {uploadLogs.length > 0 ? (
+                  uploadLogs.map((log) => (
+                    <div key={log.id} className="p-3 bg-[#2a2a2a] border border-gray-700 rounded-lg space-y-2 group/log">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-indigo-400 uppercase">{log.bank}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-gray-500">
+                            {log.uploadedAt?.toDate ? log.uploadedAt.toDate().toLocaleDateString() : 'Just now'}
+                          </span>
+                          <button 
+                            onClick={() => handleDeleteLog(log.id)}
+                            className="p-1 text-gray-600 hover:text-red-400 opacity-0 group-hover/log:opacity-100 transition-opacity"
+                            title="Delete Log"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium truncate" title={log.fileName}>{log.fileName}</p>
+                        <div className="flex items-center justify-between text-[10px] text-gray-500">
+                          <span>{log.transactionCount} transactions</span>
+                          {log.periodStart && log.periodEnd && (
+                            <span className="bg-gray-800 px-1.5 py-0.5 rounded">
+                              {new Date(log.periodStart).toLocaleDateString('en-GB', { month: 'short', year: '2-digit' })} - {new Date(log.periodEnd).toLocaleDateString('en-GB', { month: 'short', year: '2-digit' })}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-center text-gray-500 space-y-2">
+                    <CloudOff size={32} className="opacity-20" />
+                    <p className="text-sm">No upload history found.</p>
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
 
         {/* Charts Section */}
         {allTransactions.length > 0 && (

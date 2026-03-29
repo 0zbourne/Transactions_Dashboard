@@ -25,6 +25,19 @@ service cloud.firestore {
              data.createdAt is timestamp;
     }
 
+    function isValidUploadLog(data) {
+      return data.keys().hasAll(['id', 'bank', 'fileName', 'transactionCount', 'uploadedAt', 'uid']) &&
+             data.keys().hasOnly(['id', 'bank', 'fileName', 'transactionCount', 'uploadedAt', 'uid', 'periodStart', 'periodEnd']) &&
+             data.id is string &&
+             data.bank is string &&
+             data.fileName is string &&
+             data.transactionCount is number &&
+             data.uploadedAt is timestamp &&
+             data.uid == request.auth.uid &&
+             (!('periodStart' in data) || data.periodStart is string) &&
+             (!('periodEnd' in data) || data.periodEnd is string);
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -34,6 +47,11 @@ service cloud.firestore {
       allow create: if isOwner(uid) && isValidTransaction(request.resource.data);
       allow update: if isOwner(uid) && isValidTransaction(request.resource.data) && 
                       request.resource.data.id == resource.data.id;
+    }
+
+    match /users/{uid}/upload_logs/{logId} {
+      allow read, delete: if isOwner(uid);
+      allow create: if isOwner(uid) && isValidUploadLog(request.resource.data);
     }
     
     match /users/{uid} {

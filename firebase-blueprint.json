@@ -15,12 +15,32 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "When it was uploaded" }
       },
       "required": ["id", "date", "description", "amount", "category", "bank", "uid"]
+    },
+    "UploadLog": {
+      "title": "UploadLog",
+      "description": "A record of a CSV file upload event.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "bank": { "type": "string" },
+        "fileName": { "type": "string" },
+        "transactionCount": { "type": "number" },
+        "uploadedAt": { "type": "string", "format": "date-time" },
+        "periodStart": { "type": "string", "format": "date-time" },
+        "periodEnd": { "type": "string", "format": "date-time" },
+        "uid": { "type": "string" }
+      },
+      "required": ["id", "bank", "fileName", "transactionCount", "uploadedAt", "uid"]
     }
   },
   "firestore": {
     "users/{uid}/transactions": {
       "schema": "Transaction",
       "description": "User-specific transaction records"
+    },
+    "users/{uid}/upload_logs": {
+      "schema": "UploadLog",
+      "description": "History of uploaded CSV files"
     }
   }
 }
