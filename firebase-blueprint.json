@@ -1,0 +1,26 @@
+{
+  "entities": {
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A single financial transaction normalized from bank CSVs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique fingerprint hash (date-desc-amount-bank)" },
+        "date": { "type": "string", "description": "DD/MM/YYYY" },
+        "description": { "type": "string", "description": "Merchant or description" },
+        "amount": { "type": "number", "description": "Negative for spend, positive for income" },
+        "category": { "type": "string", "description": "Spending category" },
+        "bank": { "type": "string", "description": "Source bank name" },
+        "uid": { "type": "string", "description": "Owner user ID" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When it was uploaded" }
+      },
+      "required": ["id", "date", "description", "amount", "category", "bank", "uid"]
+    }
+  },
+  "firestore": {
+    "users/{uid}/transactions": {
+      "schema": "Transaction",
+      "description": "User-specific transaction records"
+    }
+  }
+}

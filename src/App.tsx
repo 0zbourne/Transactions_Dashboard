@@ -29,14 +29,89 @@ import {
   RefreshCcw,
   Trash2,
   AlertCircle,
-  Calendar
+  Calendar,
+  LogIn,
+  LogOut,
+  Cloud,
+  CloudOff
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { auth, db } from './firebase';
+import { 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut,
+  User
+} from 'firebase/auth';
+import { 
+  collection, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  writeBatch, 
+  doc, 
+  setDoc,
+  serverTimestamp,
+  deleteDoc,
+  getDocs
+} from 'firebase/firestore';
 
 // --- Utility ---
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
 }
 
 ChartJS.register(
@@ -83,6 +158,18 @@ const BANK_FORMATS = ['Barclaycard', 'Amex', 'Starling'] as const;
 type BankType = typeof BANK_FORMATS[number];
 
 // --- Logic Functions ---
+
+function generateFingerprint(t: Omit<Transaction, 'id'>): string {
+  const data = `${t.date}|${t.description}|${t.amount}|${t.bank}`;
+  // Simple hash for fingerprinting
+  let hash = 0;
+  for (let i = 0; i < data.length; i++) {
+    const char = data.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(36);
+}
 
 function autoCategorize(description: string): string {
   const desc = description.toLowerCase();
@@ -169,28 +256,77 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
 
 export default function App() {
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [selectedBank, setSelectedBank] = useState<BankType>('Barclaycard');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedMonth, setSelectedMonth] = useState<string>('all'); // Format: YYYY-MM
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
 
-  // Load from localStorage
+  // Auth Listener
   useEffect(() => {
-    const saved = localStorage.getItem('transactions');
-    if (saved) {
-      try {
-        setAllTransactions(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to parse saved transactions", e);
-      }
-    }
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
   }, []);
 
-  // Save to localStorage
+  // Firestore Sync
   useEffect(() => {
-    localStorage.setItem('transactions', JSON.stringify(allTransactions));
-  }, [allTransactions]);
+    if (!user) {
+      // Load from localStorage if not logged in
+      const saved = localStorage.getItem('transactions');
+      if (saved) {
+        try {
+          setAllTransactions(JSON.parse(saved));
+        } catch (e) {
+          console.error("Failed to parse saved transactions", e);
+        }
+      }
+      return;
+    }
+
+    // Real-time sync from Firestore
+    const q = query(
+      collection(db, `users/${user.uid}/transactions`),
+      orderBy('date', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const txs: Transaction[] = [];
+      snapshot.forEach((doc) => {
+        txs.push({ id: doc.id, ...doc.data() } as Transaction);
+      });
+      setAllTransactions(txs);
+      // Also update localStorage as a cache
+      localStorage.setItem('transactions', JSON.stringify(txs));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, `users/${user.uid}/transactions`);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  const handleLogin = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Login failed", error);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setAllTransactions([]);
+      localStorage.removeItem('transactions');
+    } catch (error) {
+      console.error("Logout failed", error);
+    }
+  };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -198,69 +334,80 @@ export default function App() {
 
     setIsAnalyzing(true);
     Papa.parse(file, {
-      complete: (results) => {
+      complete: async (results) => {
         const data = results.data as string[][];
-        const newTransactions: Transaction[] = [];
+        const parsedTxs: Omit<Transaction, 'id'>[] = [];
         
         if (selectedBank === 'Barclaycard') {
-          // No header
-          data.forEach((row, idx) => {
+          data.forEach((row) => {
             if (row.length < 7 || !row[0]) return;
-            const rawDate = row[0];
             const rawDesc = row[1];
             const rawCat = row[4] || 'Uncategorized';
-            const rawAmount = row[6];
-            
-            newTransactions.push({
-              id: `bc-${Date.now()}-${idx}`,
-              date: normalizeDate(rawDate, 'Barclaycard'),
+            parsedTxs.push({
+              date: normalizeDate(row[0], 'Barclaycard'),
               description: rawDesc,
-              amount: normalizeAmount(rawAmount, 'Barclaycard'),
+              amount: normalizeAmount(row[6], 'Barclaycard'),
               category: rawCat === 'Uncategorized' ? autoCategorize(rawDesc) : rawCat,
               bank: 'Barclaycard'
             });
           });
         } else if (selectedBank === 'Amex') {
-          // Skip header
-          data.slice(1).forEach((row, idx) => {
+          data.slice(1).forEach((row) => {
             if (row.length < 11 || !row[0]) return;
-            const rawDate = row[0];
             const rawDesc = row[1];
-            const rawAmount = row[2];
             const rawCat = row[10] ? row[10].split('-')[0].trim() : 'Uncategorized';
-            
-            newTransactions.push({
-              id: `amex-${Date.now()}-${idx}`,
-              date: normalizeDate(rawDate, 'Amex'),
+            parsedTxs.push({
+              date: normalizeDate(row[0], 'Amex'),
               description: rawDesc,
-              amount: normalizeAmount(rawAmount, 'Amex'),
+              amount: normalizeAmount(row[2], 'Amex'),
               category: rawCat === 'Uncategorized' ? autoCategorize(rawDesc) : rawCat,
               bank: 'Amex'
             });
           });
         } else if (selectedBank === 'Starling') {
-          // Skip header
-          data.slice(1).forEach((row, idx) => {
+          data.slice(1).forEach((row) => {
             if (row.length < 8 || !row[0]) return;
-            const rawDate = row[0];
             const rawDesc = row[1];
-            const rawAmount = row[4];
             const rawCat = row[6] ? row[6].replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'Uncategorized';
-            
-            newTransactions.push({
-              id: `star-${Date.now()}-${idx}`,
-              date: normalizeDate(rawDate, 'Starling'),
+            parsedTxs.push({
+              date: normalizeDate(row[0], 'Starling'),
               description: rawDesc,
-              amount: normalizeAmount(rawAmount, 'Starling'),
+              amount: normalizeAmount(row[4], 'Starling'),
               category: rawCat === 'Uncategorized' ? autoCategorize(rawDesc) : rawCat,
               bank: 'Starling'
             });
           });
         }
 
-        setAllTransactions(prev => [...prev, ...newTransactions]);
+        if (user) {
+          // Upload to Firestore with fingerprinting
+          const batch = writeBatch(db);
+          parsedTxs.forEach(tx => {
+            const fingerprint = generateFingerprint(tx);
+            const docRef = doc(db, `users/${user.uid}/transactions`, fingerprint);
+            batch.set(docRef, {
+              ...tx,
+              id: fingerprint, // Ensure ID is in the document data for rules validation
+              uid: user.uid,
+              createdAt: serverTimestamp()
+            }, { merge: true });
+          });
+          
+          try {
+            await batch.commit();
+          } catch (error) {
+            handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/transactions`);
+          }
+        } else {
+          // Fallback to local state if not logged in
+          const newTransactions = parsedTxs.map((tx, idx) => ({
+            ...tx,
+            id: `local-${Date.now()}-${idx}`
+          }));
+          setAllTransactions(prev => [...prev, ...newTransactions]);
+        }
+
         setIsAnalyzing(false);
-        // Reset input
         e.target.value = '';
       },
       error: (err) => {
@@ -271,8 +418,20 @@ export default function App() {
     });
   };
 
-  const clearData = () => {
+  const clearData = async () => {
     if (confirm("Are you sure you want to clear all transaction data?")) {
+      if (user) {
+        try {
+          // Clear Firestore (Note: for large datasets, this should be a cloud function or handled in chunks)
+          const q = query(collection(db, `users/${user.uid}/transactions`));
+          const snapshot = await getDocs(q);
+          const batch = writeBatch(db);
+          snapshot.forEach((doc) => batch.delete(doc.ref));
+          await batch.commit();
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/transactions`);
+        }
+      }
       setAllTransactions([]);
       localStorage.removeItem('transactions');
       setSelectedMonth('all');
@@ -421,9 +580,39 @@ export default function App() {
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Transaction Dashboard</h1>
-            <p className="text-gray-400 mt-1">Unified view of your bank statements</p>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-gray-400">Unified view of your bank statements</p>
+              {user && (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 bg-green-900/20 text-green-400 text-xs rounded-full border border-green-900/30">
+                  <Cloud size={12} />
+                  <span>Cloud Synced</span>
+                </div>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-3">
+            {isAuthReady && (
+              user ? (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-400 hidden sm:inline">{user.email}</span>
+                  <button 
+                    onClick={handleLogout}
+                    className="flex items-center gap-2 px-4 py-2 bg-[#2a2a2a] text-gray-300 border border-gray-700 rounded-lg hover:bg-[#333] transition-colors"
+                  >
+                    <LogOut size={18} />
+                    <span>Logout</span>
+                  </button>
+                </div>
+              ) : (
+                <button 
+                  onClick={handleLogin}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-500/20"
+                >
+                  <LogIn size={18} />
+                  <span>Login with Google</span>
+                </button>
+              )
+            )}
             <button 
               onClick={clearData}
               className="flex items-center gap-2 px-4 py-2 bg-red-900/20 text-red-400 border border-red-900/50 rounded-lg hover:bg-red-900/30 transition-colors"

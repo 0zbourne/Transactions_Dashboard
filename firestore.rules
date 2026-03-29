@@ -1,0 +1,43 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['id', 'date', 'description', 'amount', 'category', 'bank', 'uid', 'createdAt']) &&
+             data.id is string && data.id.size() > 0 && data.id.size() < 256 &&
+             data.date is string && data.date.matches("^\\d{2}/\\d{2}/\\d{4}$") &&
+             data.description is string && data.description.size() < 1000 &&
+             data.amount is number &&
+             data.category is string && data.category.size() < 100 &&
+             data.bank is string && data.bank.size() < 100 &&
+             data.uid == request.auth.uid &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    
+    match /users/{uid}/transactions/{transactionId} {
+      allow read, delete: if isOwner(uid);
+      allow create: if isOwner(uid) && isValidTransaction(request.resource.data);
+      allow update: if isOwner(uid) && isValidTransaction(request.resource.data) && 
+                      request.resource.data.id == resource.data.id;
+    }
+    
+    match /users/{uid} {
+      allow read, write: if isOwner(uid);
+    }
+  }
+}
