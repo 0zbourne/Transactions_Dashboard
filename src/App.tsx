@@ -33,7 +33,10 @@ import {
   LogIn,
   LogOut,
   Cloud,
-  CloudOff
+  CloudOff,
+  ChevronUp,
+  ChevronDown,
+  Filter
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -274,8 +277,22 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedMonth, setSelectedMonth] = useState<string>('all'); // Format: YYYY-MM
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [selectedBankFilter, setSelectedBankFilter] = useState<string>('all');
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
   const [showHistory, setShowHistory] = useState(false);
+
+  const categories = useMemo(() => {
+    const cats = new Set<string>();
+    allTransactions.forEach(t => cats.add(t.category));
+    return Array.from(cats).sort();
+  }, [allTransactions]);
+
+  const banks = useMemo(() => {
+    const bks = new Set<string>();
+    allTransactions.forEach(t => bks.add(t.bank));
+    return Array.from(bks).sort();
+  }, [allTransactions]);
 
   // Auth Listener
   useEffect(() => {
@@ -524,6 +541,16 @@ export default function App() {
       t.bank.toLowerCase().includes(searchTerm.toLowerCase())
     );
 
+    // Category filter
+    if (selectedCategory !== 'all') {
+      result = result.filter(t => t.category === selectedCategory);
+    }
+
+    // Bank filter
+    if (selectedBankFilter !== 'all') {
+      result = result.filter(t => t.bank === selectedBankFilter);
+    }
+
     result.sort((a, b) => {
       let valA = a[sortConfig.key];
       let valB = b[sortConfig.key];
@@ -535,13 +562,16 @@ export default function App() {
         valB = new Date(yB, mB - 1, dB).getTime();
       }
 
+      if (typeof valA === 'string') valA = valA.toLowerCase();
+      if (typeof valB === 'string') valB = valB.toLowerCase();
+
       if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
       if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
       return 0;
     });
 
     return result;
-  }, [allTransactions, searchTerm, sortConfig, selectedMonth]);
+  }, [allTransactions, searchTerm, sortConfig, selectedMonth, selectedCategory, selectedBankFilter]);
 
   const stats = useMemo(() => {
     // Use filtered transactions for stats to respect month filter
@@ -619,23 +649,36 @@ export default function App() {
 
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
-  const coverageData = useMemo(() => {
-    const coverage: Record<string, Set<string>> = {
+  const coverageStats = useMemo(() => {
+    const daily: Record<string, Set<string>> = {
       'Barclaycard': new Set(),
       'Amex': new Set(),
       'Starling': new Set()
     };
     
     allTransactions.forEach(t => {
-      const [d, m, y] = t.date.split('/');
-      const key = `${y}-${m}`;
-      if (coverage[t.bank]) {
-        coverage[t.bank].add(key);
+      if (daily[t.bank]) daily[t.bank].add(t.date);
+    });
+
+    const spans: Record<string, { start: number, end: number, id: string, fileName: string }[]> = {
+      'Barclaycard': [],
+      'Amex': [],
+      'Starling': []
+    };
+    
+    uploadLogs.forEach(log => {
+      if (log.periodStart && log.periodEnd && spans[log.bank]) {
+        spans[log.bank].push({
+          start: new Date(log.periodStart).getTime(),
+          end: new Date(log.periodEnd).getTime(),
+          id: log.id,
+          fileName: log.fileName
+        });
       }
     });
-    
-    return coverage;
-  }, [allTransactions]);
+
+    return { daily, spans };
+  }, [allTransactions, uploadLogs]);
 
   const last12Months = useMemo(() => {
     const months = [];
@@ -669,6 +712,27 @@ export default function App() {
     if (key === 'all') return 'All Time';
     const [y, m] = key.split('-');
     return new Date(parseInt(y), parseInt(m) - 1).toLocaleString('default', { month: 'long', year: 'numeric' });
+  };
+
+  const SortIcon = ({ column }: { column: keyof Transaction }) => {
+    if (sortConfig.key !== column) return <ChevronUp size={14} className="opacity-0 group-hover:opacity-50" />;
+    return sortConfig.direction === 'asc' ? <ChevronUp size={14} className="text-indigo-400" /> : <ChevronDown size={14} className="text-indigo-400" />;
+  };
+
+  const handleSort = (key: keyof Transaction) => {
+    setSortConfig(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
+  const isFiltered = searchTerm !== '' || selectedMonth !== 'all' || selectedCategory !== 'all' || selectedBankFilter !== 'all';
+
+  const clearFilters = () => {
+    setSearchTerm('');
+    setSelectedMonth('all');
+    setSelectedCategory('all');
+    setSelectedBankFilter('all');
   };
 
   return (
@@ -838,65 +902,107 @@ export default function App() {
         {/* History & Coverage Section */}
         {showHistory && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in slide-in-from-top-4 duration-500">
-            {/* Coverage Map */}
+            {/* Coverage Timeline */}
             <section className="lg:col-span-2 bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
-              <div className="flex items-center gap-2 mb-6">
-                <TableIcon size={18} className="text-indigo-400" />
-                <h2 className="text-lg font-semibold">Data Coverage Map</h2>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="text-xs text-gray-500 uppercase tracking-wider">
-                      <th className="pb-4 pr-4">Provider</th>
-                      {last12Months.map(m => (
-                        <th key={m} className="pb-4 px-2 text-center">
-                          {new Date(parseInt(m.split('-')[0]), parseInt(m.split('-')[1]) - 1).toLocaleString('default', { month: 'short' })}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-800">
-                    {BANK_FORMATS.map(bank => (
-                      <tr key={bank} className="group">
-                        <td className="py-4 pr-4 font-medium text-sm">{bank}</td>
-                        {last12Months.map(month => {
-                          const hasData = coverageData[bank].has(month);
-                          return (
-                            <td key={month} className="py-4 px-2">
-                              <button 
-                                onClick={() => setSelectedMonth(month)}
-                                className={cn(
-                                  "h-6 w-full rounded-md transition-all duration-300 cursor-pointer",
-                                  hasData 
-                                    ? "bg-indigo-600/40 border border-indigo-500/50 shadow-[0_0_10px_rgba(99,102,241,0.2)] hover:bg-indigo-600/60" 
-                                    : "bg-gray-800/30 border border-gray-800/50 hover:bg-gray-800/50"
-                                )}
-                                title={`${bank} - ${formatMonthKey(month)}: ${hasData ? 'Data Present' : 'Missing'}`}
-                              />
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-4">
-                <div className="flex items-center gap-4 text-xs text-gray-500">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-2">
+                  <TableIcon size={18} className="text-indigo-400" />
+                  <h2 className="text-lg font-semibold">Statement Coverage Timeline</h2>
+                </div>
+                <div className="flex items-center gap-4 text-[10px] text-gray-500">
                   <div className="flex items-center gap-1.5">
-                    <div className="h-3 w-3 rounded bg-indigo-600/40 border border-indigo-500/50" />
-                    <span>Data Present</span>
+                    <div className="h-2 w-4 bg-indigo-600/40 border border-indigo-500/50 rounded" />
+                    <span>Statement Span</span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <div className="h-3 w-3 rounded bg-gray-800/30 border border-gray-800/50" />
-                    <span>Missing Data</span>
+                    <div className="h-2 w-2 bg-indigo-400 rounded-full" />
+                    <span>Daily Activity</span>
                   </div>
                 </div>
-                {last12Months.some(m => BANK_FORMATS.some(b => !coverageData[b].has(m))) && (
-                  <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-900/10 px-3 py-1.5 rounded-lg border border-amber-900/20">
-                    <AlertCircle size={14} />
-                    <span>You have gaps in your statement history. Upload missing CSVs to complete your dashboard.</span>
+              </div>
+
+              <div className="space-y-8">
+                {BANK_FORMATS.map(bank => {
+                  const now = new Date();
+                  const startTime = new Date(now.getFullYear(), now.getMonth() - 11, 1).getTime();
+                  const endTime = now.getTime();
+                  const totalRange = endTime - startTime;
+
+                  const getPos = (time: number) => Math.max(0, Math.min(100, ((time - startTime) / totalRange) * 100));
+
+                  return (
+                    <div key={bank} className="space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-medium text-gray-300">{bank}</span>
+                        <span className="text-gray-500">Last 12 Months</span>
+                      </div>
+                      <div className="relative h-10 bg-[#2a2a2a] rounded-lg border border-gray-800 overflow-hidden group/timeline">
+                        {/* Month Markers */}
+                        {last12Months.map((m, i) => {
+                          const [y, mm] = m.split('-').map(Number);
+                          const pos = getPos(new Date(y, mm - 1, 1).getTime());
+                          return (
+                            <div 
+                              key={m} 
+                              className="absolute top-0 bottom-0 border-l border-gray-800/50 z-0" 
+                              style={{ left: `${pos}%` }}
+                            >
+                              <span className="absolute top-full mt-1 -left-2 text-[8px] text-gray-600 uppercase">
+                                {new Date(y, mm - 1, 1).toLocaleString('default', { month: 'short' })}
+                              </span>
+                            </div>
+                          );
+                        })}
+
+                        {/* Statement Spans */}
+                        {coverageStats.spans[bank].map(span => (
+                          <div 
+                            key={span.id}
+                            className="absolute top-0 bottom-0 bg-indigo-600/20 border-x border-indigo-500/30 z-10 hover:bg-indigo-600/40 transition-colors"
+                            style={{ 
+                              left: `${getPos(span.start)}%`, 
+                              width: `${getPos(span.end) - getPos(span.start)}%` 
+                            }}
+                            title={`${span.fileName}\n${new Date(span.start).toLocaleDateString()} - ${new Date(span.end).toLocaleDateString()}`}
+                          />
+                        ))}
+
+                        {/* Daily Activity Dots */}
+                        {(Array.from(coverageStats.daily[bank]) as string[]).map(dateStr => {
+                          const [d, m, y] = dateStr.split('/').map(Number);
+                          const time = new Date(y, m - 1, d).getTime();
+                          if (time < startTime) return null;
+                          return (
+                            <div 
+                              key={dateStr}
+                              className="absolute top-1/2 -translate-y-1/2 w-1 h-1 bg-indigo-400 rounded-full z-20 opacity-60"
+                              style={{ left: `${getPos(time)}%` }}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-12 pt-6 border-t border-gray-800/50 flex flex-wrap items-center justify-between gap-4">
+                <p className="text-[10px] text-gray-500 max-w-md">
+                  The timeline shows the exact date ranges covered by your uploaded CSVs. 
+                  Blue blocks represent statement spans, while dots indicate specific days with transactions.
+                </p>
+                {(last12Months as string[]).some(m => {
+                  const [y, mm] = m.split('-').map(Number);
+                  const start = new Date(y, mm - 1, 1).getTime();
+                  const end = new Date(y, mm, 0).getTime();
+                  return BANK_FORMATS.some(bank => {
+                    const hasSpan = coverageStats.spans[bank].some(s => s.start <= end && s.end >= start);
+                    return !hasSpan;
+                  });
+                }) && (
+                  <div className="flex items-center gap-2 text-[10px] text-amber-400 bg-amber-900/10 px-3 py-1.5 rounded-lg border border-amber-900/20">
+                    <AlertCircle size={12} />
+                    <span>Gaps detected in statement continuity.</span>
                   </div>
                 )}
               </div>
@@ -1053,27 +1159,93 @@ export default function App() {
               <TableIcon size={18} className="text-indigo-400" />
               <h2 className="text-lg font-semibold">Transactions</h2>
             </div>
-            <div className="relative flex-1 max-w-md">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
-              <input 
-                type="text"
-                placeholder="Search descriptions, categories..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full bg-[#2a2a2a] border border-gray-700 rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
+            <div className="flex items-center gap-4 flex-1 max-w-2xl">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
+                <input 
+                  type="text"
+                  placeholder="Search descriptions, categories..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full bg-[#2a2a2a] border border-gray-700 rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+              {isFiltered && (
+                <button 
+                  onClick={clearFilters}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 whitespace-nowrap"
+                >
+                  <RefreshCcw size={12} />
+                  Clear Filters
+                </button>
+              )}
             </div>
           </div>
           
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="bg-[#252525] text-gray-400 text-xs uppercase tracking-wider">
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white" onClick={() => setSortConfig({ key: 'date', direction: sortConfig.direction === 'asc' ? 'desc' : 'asc' })}>Date</th>
-                  <th className="px-6 py-4 font-semibold">Description</th>
-                  <th className="px-6 py-4 font-semibold">Category</th>
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white" onClick={() => setSortConfig({ key: 'amount', direction: sortConfig.direction === 'asc' ? 'desc' : 'asc' })}>Amount</th>
-                  <th className="px-6 py-4 font-semibold">Bank</th>
+                <tr className="bg-[#252525] text-gray-400 text-[10px] uppercase tracking-wider">
+                  <th className="px-6 py-4 font-semibold group cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('date')}>
+                    <div className="flex items-center gap-1">
+                      Date
+                      <SortIcon column="date" />
+                    </div>
+                  </th>
+                  <th className="px-6 py-4 font-semibold group cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('description')}>
+                    <div className="flex items-center gap-1">
+                      Description
+                      <SortIcon column="description" />
+                    </div>
+                  </th>
+                  <th className="px-6 py-4 font-semibold">
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1 cursor-pointer hover:text-white transition-colors group" onClick={() => handleSort('category')}>
+                        Category
+                        <SortIcon column="category" />
+                      </div>
+                      <div className="relative group/filter">
+                        <Filter size={12} className={cn("cursor-pointer hover:text-indigo-400 transition-colors", selectedCategory !== 'all' && "text-indigo-400")} />
+                        <select 
+                          value={selectedCategory}
+                          onChange={(e) => setSelectedCategory(e.target.value)}
+                          className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                        >
+                          <option value="all">All Categories</option>
+                          {categories.map(cat => (
+                            <option key={cat} value={cat}>{cat}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </th>
+                  <th className="px-6 py-4 font-semibold group cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('amount')}>
+                    <div className="flex items-center gap-1">
+                      Amount
+                      <SortIcon column="amount" />
+                    </div>
+                  </th>
+                  <th className="px-6 py-4 font-semibold">
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1 cursor-pointer hover:text-white transition-colors group" onClick={() => handleSort('bank')}>
+                        Bank
+                        <SortIcon column="bank" />
+                      </div>
+                      <div className="relative group/filter">
+                        <Filter size={12} className={cn("cursor-pointer hover:text-indigo-400 transition-colors", selectedBankFilter !== 'all' && "text-indigo-400")} />
+                        <select 
+                          value={selectedBankFilter}
+                          onChange={(e) => setSelectedBankFilter(e.target.value)}
+                          className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                        >
+                          <option value="all">All Banks</option>
+                          {banks.map(bank => (
+                            <option key={bank} value={bank}>{bank}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
