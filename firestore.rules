@@ -22,7 +22,8 @@ service cloud.firestore {
              data.category is string && data.category.size() < 100 &&
              data.bank is string && data.bank.size() < 100 &&
              data.uid == request.auth.uid &&
-             data.createdAt is timestamp;
+             data.createdAt is timestamp &&
+             (!('uploadLogIds' in data) || data.uploadLogIds is list);
     }
 
     function isValidUploadLog(data) {

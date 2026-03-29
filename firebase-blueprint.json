@@ -12,6 +12,7 @@
         "category": { "type": "string", "description": "Spending category" },
         "bank": { "type": "string", "description": "Source bank name" },
         "uid": { "type": "string", "description": "Owner user ID" },
+        "uploadLogIds": { "type": "array", "items": { "type": "string" }, "description": "IDs of upload logs containing this transaction" },
         "createdAt": { "type": "string", "format": "date-time", "description": "When it was uploaded" }
       },
       "required": ["id", "date", "description", "amount", "category", "bank", "uid"]

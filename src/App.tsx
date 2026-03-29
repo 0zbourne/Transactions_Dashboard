@@ -58,7 +58,11 @@ import {
   setDoc,
   serverTimestamp,
   deleteDoc,
-  getDocs
+  getDocs,
+  where,
+  arrayUnion,
+  arrayRemove,
+  updateDoc
 } from 'firebase/firestore';
 
 // --- Utility ---
@@ -135,6 +139,7 @@ interface Transaction {
   amount: number;
   category: string;
   bank: 'Barclaycard' | 'Amex' | 'Starling';
+  uploadLogIds?: string[];
 }
 
 interface UploadLog {
@@ -173,8 +178,12 @@ type BankType = typeof BANK_FORMATS[number];
 
 // --- Logic Functions ---
 
-function generateFingerprint(t: Omit<Transaction, 'id'>): string {
-  const data = `${t.date}|${t.description}|${t.amount}|${t.bank}`;
+/**
+ * Generates a unique fingerprint for a transaction to prevent duplicates.
+ * Includes an index to handle multiple identical transactions on the same day.
+ */
+function generateFingerprint(t: Omit<Transaction, 'id'>, index: number = 0): string {
+  const data = `${t.date}|${t.description}|${t.amount}|${t.bank}|${index}`;
   // Simple hash for fingerprinting
   let hash = 0;
   for (let i = 0; i < data.length; i++) {
@@ -281,6 +290,21 @@ export default function App() {
   const [selectedBankFilter, setSelectedBankFilter] = useState<string>('all');
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
   const [showHistory, setShowHistory] = useState(false);
+  const [modal, setModal] = useState<{
+    show: boolean;
+    title: string;
+    message: string;
+    onConfirm?: () => void;
+    type: 'confirm' | 'alert';
+  }>({ show: false, title: '', message: '', type: 'alert' });
+
+  const showAlert = (title: string, message: string) => {
+    setModal({ show: true, title, message, type: 'alert' });
+  };
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void) => {
+    setModal({ show: true, title, message, onConfirm, type: 'confirm' });
+  };
 
   const categories = useMemo(() => {
     const cats = new Set<string>();
@@ -428,88 +452,165 @@ export default function App() {
           });
         }
 
-        if (user) {
-          // Upload to Firestore with fingerprinting
-          const batch = writeBatch(db);
-          parsedTxs.forEach(tx => {
-            const fingerprint = generateFingerprint(tx);
-            const docRef = doc(db, `users/${user.uid}/transactions`, fingerprint);
-            batch.set(docRef, {
-              ...tx,
-              id: fingerprint, // Ensure ID is in the document data for rules validation
-              uid: user.uid,
-              createdAt: serverTimestamp()
-            }, { merge: true });
-          });
-          
-          // Add Upload Log
-          const logId = `log-${Date.now()}`;
-          const logRef = doc(db, `users/${user.uid}/upload_logs`, logId);
-          
-          // Detect period
-          let minDate = Infinity;
-          let maxDate = -Infinity;
-          parsedTxs.forEach(tx => {
-            const [d, m, y] = tx.date.split('/').map(Number);
-            const time = new Date(y, m - 1, d).getTime();
-            if (time < minDate) minDate = time;
-            if (time > maxDate) maxDate = time;
-          });
+        // Detect period
+        let minDate = Infinity;
+        let maxDate = -Infinity;
+        parsedTxs.forEach(tx => {
+          const [d, m, y] = tx.date.split('/').map(Number);
+          const time = new Date(y, m - 1, d).getTime();
+          if (time < minDate) minDate = time;
+          if (time > maxDate) maxDate = time;
+        });
 
-          batch.set(logRef, {
-            id: logId,
-            bank: selectedBank,
-            fileName: file.name,
-            transactionCount: parsedTxs.length,
-            uploadedAt: serverTimestamp(),
-            periodStart: minDate !== Infinity ? new Date(minDate).toISOString() : null,
-            periodEnd: maxDate !== -Infinity ? new Date(maxDate).toISOString() : null,
-            uid: user.uid
-          });
-          
-          try {
-            await batch.commit();
-          } catch (error) {
-            handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/transactions`);
+        const periodStart = minDate !== Infinity ? new Date(minDate).toISOString() : null;
+        const periodEnd = maxDate !== -Infinity ? new Date(maxDate).toISOString() : null;
+
+        const logId = `log_${Date.now()}`;
+        const logRef = user ? doc(db, `users/${user.uid}/upload_logs`, logId) : null;
+
+        const processUpload = async () => {
+          if (user) {
+            // Upload to Firestore with fingerprinting
+            const batch = writeBatch(db);
+            const occurrenceMap: Record<string, number> = {};
+            
+            parsedTxs.forEach(tx => {
+              const key = `${tx.date}|${tx.description}|${tx.amount}|${tx.bank}`;
+              const occurrence = occurrenceMap[key] || 0;
+              occurrenceMap[key] = occurrence + 1;
+              
+              const fingerprint = generateFingerprint(tx, occurrence);
+              const docRef = doc(db, `users/${user.uid}/transactions`, fingerprint);
+              batch.set(docRef, {
+                ...tx,
+                id: fingerprint, // Ensure ID is in the document data for rules validation
+                uid: user.uid,
+                uploadLogIds: arrayUnion(logId),
+                createdAt: serverTimestamp()
+              }, { merge: true });
+            });
+            
+            if (logRef) {
+              batch.set(logRef, {
+                id: logId,
+                bank: selectedBank,
+                fileName: file.name,
+                transactionCount: parsedTxs.length,
+                uploadedAt: serverTimestamp(),
+                periodStart,
+                periodEnd,
+                uid: user.uid
+              });
+            }
+            
+            try {
+              setIsAnalyzing(true);
+              await batch.commit();
+              setIsAnalyzing(false);
+              showAlert("Upload Complete", `Successfully uploaded ${parsedTxs.length} transactions.`);
+            } catch (error) {
+              setIsAnalyzing(false);
+              handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/transactions`);
+            }
+          } else {
+            // Fallback to local state if not logged in
+            // Use fingerprinting for local state too to prevent duplicates
+            const occurrenceMap: Record<string, number> = {};
+            
+            setAllTransactions(prev => {
+              const existingIds = new Set(prev.map(t => t.id));
+              const newTransactions: Transaction[] = [];
+              
+              parsedTxs.forEach(tx => {
+                const key = `${tx.date}|${tx.description}|${tx.amount}|${tx.bank}`;
+                const occurrence = occurrenceMap[key] || 0;
+                occurrenceMap[key] = occurrence + 1;
+                
+                const fingerprint = generateFingerprint(tx, occurrence);
+                if (!existingIds.has(fingerprint)) {
+                  newTransactions.push({ ...tx, id: fingerprint });
+                }
+              });
+              
+              return [...prev, ...newTransactions];
+            });
+            showAlert("Upload Complete", `Successfully added ${parsedTxs.length} transactions locally.`);
           }
-        } else {
-          // Fallback to local state if not logged in
-          const newTransactions = parsedTxs.map((tx, idx) => ({
-            ...tx,
-            id: `local-${Date.now()}-${idx}`
-          }));
-          setAllTransactions(prev => [...prev, ...newTransactions]);
+          setIsAnalyzing(false);
+          e.target.value = '';
+        };
+
+        if (user) {
+          // Check for duplicate upload log
+          const isDuplicateUpload = uploadLogs.some(log => 
+            log.fileName === file.name && 
+            log.transactionCount === parsedTxs.length &&
+            log.periodStart === periodStart &&
+            log.periodEnd === periodEnd
+          );
+
+          if (isDuplicateUpload) {
+            showConfirm(
+              "Duplicate Upload Detected",
+              `It looks like you've already uploaded "${file.name}" for this period. Uploading it again won't create duplicate transactions, but it will add another entry to your upload history. Do you want to proceed?`,
+              processUpload
+            );
+            return;
+          }
         }
 
-        setIsAnalyzing(false);
-        e.target.value = '';
+        processUpload();
       },
       error: (err) => {
         console.error("CSV Parse Error", err);
         setIsAnalyzing(false);
-        alert("Failed to parse CSV file.");
+        showAlert("Upload Error", "Failed to parse CSV file.");
       }
     });
   };
 
   const clearData = async () => {
-    if (confirm("Are you sure you want to clear all transaction data?")) {
-      if (user) {
-        try {
-          // Clear Firestore (Note: for large datasets, this should be a cloud function or handled in chunks)
-          const q = query(collection(db, `users/${user.uid}/transactions`));
-          const snapshot = await getDocs(q);
-          const batch = writeBatch(db);
-          snapshot.forEach((doc) => batch.delete(doc.ref));
-          await batch.commit();
-        } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/transactions`);
+    showConfirm(
+      "Clear All Data",
+      "Are you sure you want to clear all transaction and history data? This action cannot be undone.",
+      async () => {
+        if (user) {
+          try {
+            setIsAnalyzing(true);
+            
+            // Clear Transactions in chunks (Firestore batch limit is 500)
+            const txSnapshot = await getDocs(collection(db, `users/${user.uid}/transactions`));
+            const txDocs = txSnapshot.docs;
+            
+            for (let i = 0; i < txDocs.length; i += 450) {
+              const batch = writeBatch(db);
+              txDocs.slice(i, i + 450).forEach(d => batch.delete(d.ref));
+              await batch.commit();
+            }
+
+            // Clear Logs in chunks
+            const logSnapshot = await getDocs(collection(db, `users/${user.uid}/upload_logs`));
+            const logDocs = logSnapshot.docs;
+            
+            for (let i = 0; i < logDocs.length; i += 450) {
+              const batch = writeBatch(db);
+              logDocs.slice(i, i + 450).forEach(d => batch.delete(d.ref));
+              await batch.commit();
+            }
+
+            setIsAnalyzing(false);
+            showAlert("Data Cleared", "All your transaction and history data has been removed.");
+          } catch (error) {
+            setIsAnalyzing(false);
+            handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/transactions`);
+          }
         }
+        setAllTransactions([]);
+        setUploadLogs([]);
+        localStorage.removeItem('transactions');
+        setSelectedMonth('all');
       }
-      setAllTransactions([]);
-      localStorage.removeItem('transactions');
-      setSelectedMonth('all');
-    }
+    );
   };
 
   // --- Derived Data ---
@@ -693,15 +794,54 @@ export default function App() {
   }, []);
 
   const handleDeleteLog = async (logId: string) => {
-    if (confirm("Are you sure you want to delete this upload log? This will NOT delete the transactions (to prevent data loss if they were also in other files).")) {
-      if (user) {
-        try {
-          await deleteDoc(doc(db, `users/${user.uid}/upload_logs`, logId));
-        } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/upload_logs`);
+    showConfirm(
+      "Delete Upload Log",
+      "Are you sure you want to delete this upload log? This will also delete all transactions that were ONLY part of this statement. Transactions that appear in other uploaded statements will be kept.",
+      async () => {
+        if (user) {
+          try {
+            setIsAnalyzing(true);
+            
+            // 1. Find all transactions associated with this log
+            const txQuery = query(
+              collection(db, `users/${user.uid}/transactions`),
+              where('uploadLogIds', 'array-contains', logId)
+            );
+            const txSnapshot = await getDocs(txQuery);
+            const txDocs = txSnapshot.docs;
+            
+            // Process transactions in chunks (Firestore batch limit is 500)
+            for (let i = 0; i < txDocs.length; i += 450) {
+              const batch = writeBatch(db);
+              txDocs.slice(i, i + 450).forEach((transactionDoc) => {
+                const data = transactionDoc.data() as Transaction;
+                const currentLogIds = data.uploadLogIds || [];
+                
+                if (currentLogIds.length <= 1) {
+                  // This transaction only belongs to this log, delete it
+                  batch.delete(transactionDoc.ref);
+                } else {
+                  // This transaction belongs to other logs too, just remove this logId
+                  batch.update(transactionDoc.ref, {
+                    uploadLogIds: arrayRemove(logId)
+                  });
+                }
+              });
+              await batch.commit();
+            }
+            
+            // 2. Delete the log itself
+            await deleteDoc(doc(db, `users/${user.uid}/upload_logs`, logId));
+            
+            setIsAnalyzing(false);
+            showAlert("Log Deleted", "The upload log and its unique transactions have been removed.");
+          } catch (error) {
+            setIsAnalyzing(false);
+            handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/upload_logs`);
+          }
         }
       }
-    }
+    );
   };
 
   const formatCurrency = (val: number) => {
@@ -737,6 +877,38 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#121212] text-white font-sans p-4 md:p-8">
+      {/* Modal */}
+      {modal.show && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6 max-w-md w-full shadow-2xl animate-in fade-in zoom-in duration-200">
+            <h3 className="text-xl font-bold text-white mb-2">{modal.title}</h3>
+            <p className="text-gray-400 mb-6 leading-relaxed">{modal.message}</p>
+            <div className="flex justify-end gap-3">
+              {modal.type === 'confirm' && (
+                <button 
+                  onClick={() => setModal({ ...modal, show: false })}
+                  className="px-5 py-2.5 bg-[#2a2a2a] text-gray-300 border border-gray-700 rounded-lg hover:bg-[#333] transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+              <button 
+                onClick={() => {
+                  if (modal.onConfirm) modal.onConfirm();
+                  setModal({ ...modal, show: false });
+                }}
+                className={`px-5 py-2.5 rounded-lg transition-colors font-medium ${
+                  modal.type === 'confirm' 
+                    ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-500/20' 
+                    : 'bg-[#2a2a2a] text-gray-300 border border-gray-700 hover:bg-[#333]'
+                }`}
+              >
+                {modal.type === 'confirm' ? 'Confirm' : 'OK'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="max-w-7xl mx-auto space-y-8">
         
         {/* Header */}
@@ -788,10 +960,14 @@ export default function App() {
             )}
             <button 
               onClick={clearData}
-              className="flex items-center gap-2 px-4 py-2 bg-red-900/20 text-red-400 border border-red-900/50 rounded-lg hover:bg-red-900/30 transition-colors"
+              disabled={isAnalyzing}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 bg-red-900/20 text-red-400 border border-red-900/50 rounded-lg transition-colors",
+                isAnalyzing ? "opacity-50 cursor-not-allowed" : "hover:bg-red-900/30"
+              )}
             >
               <Trash2 size={18} />
-              <span>Clear Data</span>
+              <span>{isAnalyzing ? "Processing..." : "Clear Data"}</span>
             </button>
           </div>
         </header>
@@ -1026,7 +1202,11 @@ export default function App() {
                           </span>
                           <button 
                             onClick={() => handleDeleteLog(log.id)}
-                            className="p-1 text-gray-600 hover:text-red-400 opacity-0 group-hover/log:opacity-100 transition-opacity"
+                            disabled={isAnalyzing}
+                            className={cn(
+                              "p-1 text-gray-600 transition-all",
+                              isAnalyzing ? "opacity-30 cursor-not-allowed" : "hover:text-red-400 opacity-0 group-hover/log:opacity-100"
+                            )}
                             title="Delete Log"
                           >
                             <Trash2 size={12} />
