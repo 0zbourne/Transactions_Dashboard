@@ -1,0 +1,5 @@
+{
+  "name": "Transaction Dashboard MVP",
+  "description": "A unified dashboard for Barclaycard, Amex, and Starling bank transactions with auto-categorization and subscription detection.",
+  "requestFramePermissions": []
+}
