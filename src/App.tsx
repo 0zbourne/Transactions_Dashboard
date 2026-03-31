@@ -201,17 +201,24 @@ function normalizeAmount(amountStr: string, bank: BankType): number {
   return val;
 }
 
+function parseDate(dateStr: string): Date {
+  const [d, m, y] = dateStr.split('/').map(Number);
+  return new Date(y, m - 1, d);
+}
+
 function detectSubscriptions(transactions: Transaction[]): Subscription[] {
   const groups: Record<string, Transaction[]> = {};
   
   transactions.forEach(t => {
     if (t.amount >= 0) return; // Only spending
+    if (t.category === 'Transfer') return; // Skip transfers
     
     // Normalize description: lowercase, remove numbers and special chars
     const normalizedDesc = t.description
       .toLowerCase()
       .replace(/[0-9]/g, '')
       .replace(/[*#]/g, '')
+      .replace(/\s+/g, ' ')
       .trim();
       
     if (!groups[normalizedDesc]) groups[normalizedDesc] = [];
@@ -223,16 +230,64 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
   Object.entries(groups).forEach(([desc, txs]) => {
     if (txs.length < 2) return;
     
-    // Check if amounts are within 10%
+    // Sort by date
+    const sortedTxs = [...txs].sort((a, b) => {
+      const dateA = parseDate(a.date).getTime();
+      const dateB = parseDate(b.date).getTime();
+      return dateA - dateB;
+    });
+
+    // Calculate intervals (days between)
+    const intervals: number[] = [];
+    for (let i = 1; i < sortedTxs.length; i++) {
+      const d1 = parseDate(sortedTxs[i-1].date);
+      const d2 = parseDate(sortedTxs[i].date);
+      const diffDays = Math.round((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
+      intervals.push(diffDays);
+    }
+
+    // Check if amounts are within 15% tolerance
     const avgAmount = txs.reduce((sum, t) => sum + t.amount, 0) / txs.length;
-    const isConsistent = txs.every(t => Math.abs(t.amount - avgAmount) <= Math.abs(avgAmount * 0.1));
-    
-    if (isConsistent) {
+    const isAmountConsistent = txs.every(t => Math.abs(t.amount - avgAmount) <= Math.abs(avgAmount * 0.15));
+
+    if (!isAmountConsistent) return;
+
+    // Detect frequency based on intervals
+    let frequency = '';
+    if (intervals.length === 1) {
+      const days = intervals[0];
+      // For only 2 transactions, we must be very close to a standard period
+      if (days >= 27 && days <= 33) frequency = 'Monthly';
+      else if (days >= 6 && days <= 8) frequency = 'Weekly';
+      else if (days >= 350 && days <= 380) frequency = 'Yearly';
+    } else {
+      // Multiple intervals - check median
+      const sortedIntervals = [...intervals].sort((a, b) => a - b);
+      const median = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+      
+      if (median >= 25 && median <= 35) frequency = 'Monthly';
+      else if (median >= 6 && median <= 8) frequency = 'Weekly';
+      else if (median >= 350 && median <= 380) frequency = 'Yearly';
+      
+      // Check if intervals are somewhat consistent (at least 70% of intervals are close to median)
+      const closeToMedianCount = intervals.filter(d => Math.abs(d - median) <= 5).length;
+      if (closeToMedianCount / intervals.length < 0.7) {
+         frequency = ''; 
+      }
+    }
+
+    // Final check: if it's a common shopping merchant but intervals are not strictly monthly, skip
+    const isShopping = ['amazon', 'tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'ebay'].some(m => desc.includes(m));
+    if (isShopping && frequency === 'Monthly' && intervals.some(d => d < 20)) {
+      frequency = '';
+    }
+
+    if (frequency) {
       subs.push({
         merchant: txs[0].description,
-        frequency: 'Monthly', // Simplified assumption
+        frequency,
         avgAmount: Math.abs(avgAmount),
-        annualCost: Math.abs(avgAmount) * 12,
+        annualCost: Math.abs(avgAmount) * (frequency === 'Monthly' ? 12 : frequency === 'Weekly' ? 52 : 1),
         count: txs.length
       });
     }
