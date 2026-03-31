@@ -33,7 +33,8 @@ import {
   ChevronUp,
   ChevronDown,
   Filter,
-  CloudOff
+  CloudOff,
+  Info
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -85,7 +86,9 @@ interface Subscription {
 
 // --- Constants ---
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  'Transfer': ['direct debit', 'payment received', 'amex', 'american express', 'barclaycard', 'credit card', 'transfer'],
+  'Income': ['salary', 'wage', 'payroll', 'employer', 'dividend', 'interest', 'refund', 'cashback'],
+  'Savings & Investments': ['trading 212', 't212', 'vanguard', 'isa', 'investment', 'savings', 'pension', 'crypto', 'coinbase', 'binance'],
+  'Transfer': ['direct debit', 'payment received', 'amex', 'american express', 'barclaycard', 'credit card', 'transfer', 'pot', 'space', 'to starling', 'from starling'],
   'Groceries': ['tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'co-op', 'coop', '7 11', 'waitrose', 'marks & spencer', 'm&s'],
   'Transport': ['uber', 'bolt', 'tfl', 'grab', 'fuel', 'petrol', 'trainline', 'eurostar', 'shell', 'bp'],
   'Eating Out': ['wetherspoon', 'nandos', 'starbucks', 'costa', 'mcdonalds', 'subway', 'restaurant', 'bar', 'pub', 'deliveroo', 'just eat', 'uber eats'],
@@ -116,14 +119,26 @@ function generateFingerprint(t: Omit<Transaction, 'id'>, index: number = 0): str
   return Math.abs(hash).toString(36);
 }
 
-function autoCategorize(description: string): string {
+function autoCategorize(description: string, amount: number, bankCategory: string = 'Uncategorized'): string {
   const desc = description.toLowerCase();
+  
+  // Special handling for Trading 212 as requested
+  if (desc.includes('trading 212') || desc.includes('t212')) {
+    return 'Savings & Investments';
+  }
+
   for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
     if (keywords.some(kw => desc.includes(kw.toLowerCase()))) {
+      // If it's a positive amount and matches income keywords, it's income
+      if (category === 'Income' && amount <= 0) continue;
+      // If it's a negative amount and matches income keywords (like a refund), it might be uncategorized or a refund
+      if (category === 'Transfer') return 'Transfer';
       return category;
     }
   }
-  return 'Uncategorized';
+
+  // If no keyword match, use bank category if available
+  return bankCategory !== 'Uncategorized' ? bankCategory : 'Uncategorized';
 }
 
 function normalizeDate(dateStr: string, bank: BankType): string {
@@ -205,9 +220,9 @@ export default function App() {
   const [selectedBank, setSelectedBank] = useState<BankType>('Barclaycard');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedMonth, setSelectedMonth] = useState<string>('trailing12'); // Format: YYYY-MM or 'trailing12'
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedBankFilter, setSelectedBankFilter] = useState<string>('all');
+  const [hideTransfers, setHideTransfers] = useState(true);
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
   const [showHistory, setShowHistory] = useState(false);
   const [modal, setModal] = useState<{
@@ -288,7 +303,7 @@ export default function App() {
               date: normalizeDate(row[0], 'Barclaycard'),
               description: rawDesc,
               amount: normalizeAmount(row[6], 'Barclaycard'),
-              category: rawCat === 'Uncategorized' ? autoCategorize(rawDesc) : rawCat,
+              category: autoCategorize(rawDesc, normalizeAmount(row[6], 'Barclaycard'), rawCat),
               bank: 'Barclaycard'
             });
           });
@@ -301,7 +316,7 @@ export default function App() {
               date: normalizeDate(row[0], 'Amex'),
               description: rawDesc,
               amount: normalizeAmount(row[2], 'Amex'),
-              category: rawCat === 'Uncategorized' ? autoCategorize(rawDesc) : rawCat,
+              category: autoCategorize(rawDesc, normalizeAmount(row[2], 'Amex'), rawCat),
               bank: 'Amex'
             });
           });
@@ -314,7 +329,7 @@ export default function App() {
               date: normalizeDate(row[0], 'Starling'),
               description: rawDesc,
               amount: normalizeAmount(row[4], 'Starling'),
-              category: rawCat === 'Uncategorized' ? autoCategorize(rawDesc) : rawCat,
+              category: autoCategorize(rawDesc, normalizeAmount(row[4], 'Starling'), rawCat),
               bank: 'Starling'
             });
           });
@@ -418,37 +433,39 @@ export default function App() {
         setUploadLogs([]);
         localStorage.removeItem('transactions');
         localStorage.removeItem('upload_logs');
-        setSelectedMonth('trailing12');
       }
     );
   };
 
   // --- Derived Data ---
 
-  const availableMonths = useMemo(() => {
-    const months = new Set<string>();
+  const dashboardPeriod = useMemo(() => {
+    if (allTransactions.length === 0) return null;
+    
+    let maxTime = -Infinity;
     allTransactions.forEach(t => {
-      const [d, m, y] = t.date.split('/');
-      months.add(`${y}-${m}`);
+      const [d, m, y] = t.date.split('/').map(Number);
+      const time = new Date(y, m - 1, d).getTime();
+      if (time > maxTime) maxTime = time;
     });
-    return Array.from(months).sort().reverse();
+    
+    const latestDate = new Date(maxTime);
+    const startDate = new Date(latestDate.getFullYear(), latestDate.getMonth() - 11, 1);
+    
+    return {
+      startTime: startDate.getTime(),
+      label: `${startDate.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })} - ${latestDate.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}`
+    };
   }, [allTransactions]);
-  
+
   const filteredTransactions = useMemo(() => {
     let result = allTransactions;
 
-    // Month filter
-    if (selectedMonth === 'trailing12') {
-      const now = new Date();
-      const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1).getTime();
+    // 12-month window based on latest transaction
+    if (dashboardPeriod) {
       result = result.filter(t => {
         const [d, m, y] = t.date.split('/').map(Number);
-        return new Date(y, m - 1, d).getTime() >= twelveMonthsAgo;
-      });
-    } else if (selectedMonth !== 'all') {
-      result = result.filter(t => {
-        const [d, m, y] = t.date.split('/');
-        return `${y}-${m}` === selectedMonth;
+        return new Date(y, m - 1, d).getTime() >= dashboardPeriod.startTime;
       });
     }
 
@@ -467,6 +484,11 @@ export default function App() {
     // Bank filter
     if (selectedBankFilter !== 'all') {
       result = result.filter(t => t.bank === selectedBankFilter);
+    }
+
+    // Hide transfers filter
+    if (hideTransfers) {
+      result = result.filter(t => t.category !== 'Transfer');
     }
 
     result.sort((a, b) => {
@@ -489,19 +511,43 @@ export default function App() {
     });
 
     return result;
-  }, [allTransactions, searchTerm, sortConfig, selectedMonth, selectedCategory, selectedBankFilter]);
+  }, [allTransactions, searchTerm, sortConfig, selectedCategory, selectedBankFilter, dashboardPeriod, hideTransfers]);
 
   const stats = useMemo(() => {
-    // Use filtered transactions for stats to respect month filter
+    // Use filtered transactions for stats (already restricted to 12 months)
     const nonTransferTransactions = filteredTransactions.filter(t => t.category !== 'Transfer');
     
-    const totalSpent = nonTransferTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + t.amount, 0);
-    const totalIncome = nonTransferTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+    const totalSpent = nonTransferTransactions.filter(t => t.amount < 0 && t.category !== 'Savings & Investments').reduce((sum, t) => sum + t.amount, 0);
+    const totalIncome = nonTransferTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + t.amount, 0);
+    const totalSavings = nonTransferTransactions.filter(t => t.category === 'Savings & Investments').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+    
+    // Count unique months in the filtered data to get accurate averages
+    const monthsInData = new Set(filteredTransactions.map(t => {
+      const [d, m, y] = t.date.split('/');
+      return `${y}-${m}`;
+    })).size || 1;
+
+    // Monthly averages
+    const monthlyIncome = totalIncome / monthsInData;
+    const monthlySavings = totalSavings / monthsInData;
+    const monthlySpent = Math.abs(totalSpent) / monthsInData;
+    const monthlyNet = (totalIncome + totalSpent - totalSavings) / monthsInData;
+
+    // Yearly estimates (annualized based on available data)
+    const yearlyIncome = monthlyIncome * 12;
+    const yearlySavings = monthlySavings * 12;
+    const savingsRate = yearlyIncome > 0 ? (yearlySavings / yearlyIncome) * 100 : 0;
+
     return {
-      spent: Math.abs(totalSpent),
-      income: totalIncome,
-      net: totalIncome + totalSpent,
-      count: filteredTransactions.length
+      spent: monthlySpent,
+      income: monthlyIncome,
+      savings: monthlySavings,
+      yearlyIncome,
+      yearlySavings,
+      savingsRate,
+      net: monthlyNet,
+      count: filteredTransactions.length,
+      monthsCount: monthsInData
     };
   }, [filteredTransactions]);
 
@@ -626,13 +672,6 @@ export default function App() {
     return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(val);
   };
 
-  const formatMonthKey = (key: string) => {
-    if (key === 'all') return 'All Time';
-    if (key === 'trailing12') return 'Last 12 Months';
-    const [y, m] = key.split('-');
-    return new Date(parseInt(y), parseInt(m) - 1).toLocaleString('default', { month: 'long', year: 'numeric' });
-  };
-
   const SortIcon = ({ column }: { column: keyof Transaction }) => {
     if (sortConfig.key !== column) return <ChevronUp size={14} className="opacity-0 group-hover:opacity-50" />;
     return sortConfig.direction === 'asc' ? <ChevronUp size={14} className="text-indigo-400" /> : <ChevronDown size={14} className="text-indigo-400" />;
@@ -645,13 +684,13 @@ export default function App() {
     }));
   };
 
-  const isFiltered = searchTerm !== '' || (selectedMonth !== 'all' && selectedMonth !== 'trailing12') || selectedCategory !== 'all' || selectedBankFilter !== 'all';
+  const isFiltered = searchTerm !== '' || selectedCategory !== 'all' || selectedBankFilter !== 'all';
 
   const clearFilters = () => {
     setSearchTerm('');
-    setSelectedMonth('trailing12');
     setSelectedCategory('all');
     setSelectedBankFilter('all');
+    setHideTransfers(true);
   };
 
   return (
@@ -695,7 +734,9 @@ export default function App() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight">1-Year Trailing Dashboard</h1>
             <div className="flex items-center gap-2 mt-1">
-              <p className="text-gray-400">Local-only view of your bank statements</p>
+              <p className="text-gray-400">
+                {dashboardPeriod ? `Analysis for ${dashboardPeriod.label}` : "Local-only view of your bank statements"}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -724,8 +765,8 @@ export default function App() {
         </header>
 
         {/* Month Filter & Upload Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <section className="lg:col-span-2 bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
+        <div className="grid grid-cols-1 gap-6">
+          <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
             <div className="flex flex-col md:flex-row items-end gap-6">
               <div className="w-full md:w-64 space-y-2">
                 <label className="text-sm font-medium text-gray-400">Select Bank Format</label>
@@ -762,76 +803,87 @@ export default function App() {
               </div>
             </div>
           </section>
-
-          {/* Month Selector */}
-          <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
-            <label className="text-sm font-medium text-gray-400 block mb-4">Viewing Period</label>
-            <div className="space-y-2 max-h-[140px] overflow-y-auto pr-2 custom-scrollbar">
-              <button 
-                onClick={() => setSelectedMonth('trailing12')}
-                className={cn(
-                  "w-full text-left px-4 py-2 rounded-lg transition-colors text-sm",
-                  selectedMonth === 'trailing12' ? "bg-indigo-600 text-white" : "bg-[#2a2a2a] text-gray-400 hover:bg-[#333]"
-                )}
-              >
-                Last 12 Months
-              </button>
-              <button 
-                onClick={() => setSelectedMonth('all')}
-                className={cn(
-                  "w-full text-left px-4 py-2 rounded-lg transition-colors text-sm",
-                  selectedMonth === 'all' ? "bg-indigo-600 text-white" : "bg-[#2a2a2a] text-gray-400 hover:bg-[#333]"
-                )}
-              >
-                All Time
-              </button>
-              {availableMonths.map(month => (
-                <button 
-                  key={month}
-                  onClick={() => setSelectedMonth(month)}
-                  className={cn(
-                    "w-full text-left px-4 py-2 rounded-lg transition-colors text-sm",
-                    selectedMonth === month ? "bg-indigo-600 text-white" : "bg-[#2a2a2a] text-gray-400 hover:bg-[#333]"
-                  )}
-                >
-                  {formatMonthKey(month)}
-                </button>
-              ))}
-            </div>
-          </section>
         </div>
 
         {/* Summary Cards */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-gray-400 text-sm font-medium">Total Spent</span>
+              <span className="text-gray-400 text-sm font-medium">Monthly Spending</span>
               <TrendingDown className="text-red-400" size={20} />
             </div>
             <p className="text-2xl font-bold text-red-400">{formatCurrency(stats.spent)}</p>
+            <p className="text-[10px] text-gray-500">Avg. monthly spend (excl. transfers)</p>
           </div>
           <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-gray-400 text-sm font-medium">Total Income</span>
+              <span className="text-gray-400 text-sm font-medium">Monthly Income</span>
               <TrendingUp className="text-green-400" size={20} />
             </div>
             <p className="text-2xl font-bold text-green-400">{formatCurrency(stats.income)}</p>
+            <p className="text-[10px] text-gray-500">Avg. monthly income</p>
           </div>
           <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-gray-400 text-sm font-medium">Net Position</span>
+              <span className="text-gray-400 text-sm font-medium">Monthly Savings</span>
+              <PieChart className="text-amber-400" size={20} />
+            </div>
+            <p className="text-2xl font-bold text-amber-400">{formatCurrency(stats.savings)}</p>
+            <p className="text-[10px] text-gray-500">Avg. monthly savings/investments</p>
+          </div>
+          <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-400 text-sm font-medium">Net Cash Flow</span>
               <Wallet className="text-indigo-400" size={20} />
             </div>
             <p className={cn("text-2xl font-bold", stats.net >= 0 ? "text-green-400" : "text-red-400")}>
               {formatCurrency(stats.net)}
             </p>
+            <p className="text-[10px] text-gray-500">Avg. monthly net cash flow</p>
           </div>
-          <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-gray-400 text-sm font-medium">Transactions</span>
-              <RefreshCcw className="text-gray-500" size={20} />
+        </section>
+
+        {/* Financial Health Section */}
+        <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6 overflow-hidden relative group">
+          <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-10 transition-opacity">
+            <TrendingUp size={120} className="text-indigo-400" />
+          </div>
+          <div className="relative z-10">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-2">
+                <BarChart3 size={20} className="text-indigo-400" />
+                <h2 className="text-xl font-bold">Financial Health Summary</h2>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-500 bg-gray-800/50 px-3 py-1.5 rounded-lg border border-gray-700">
+                <Info size={12} className="text-indigo-400" />
+                <span>Internal transfers are excluded from spending to prevent overstatement.</span>
+              </div>
             </div>
-            <p className="text-2xl font-bold">{stats.count}</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Est. Yearly Income (After Tax)</p>
+                <p className="text-3xl font-bold text-white">{formatCurrency(stats.yearlyIncome)}</p>
+                <p className="text-[10px] text-gray-400 mt-1">Based on identified salary deposits</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Est. Yearly Savings/Investments</p>
+                <p className="text-3xl font-bold text-amber-400">{formatCurrency(stats.yearlySavings)}</p>
+                <p className="text-[10px] text-gray-400 mt-1">Including Trading 212 contributions</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Target Savings Rate</p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-3xl font-bold text-indigo-400">{stats.savingsRate.toFixed(1)}%</p>
+                  <span className="text-xs text-gray-500">of income</span>
+                </div>
+                <div className="w-full h-1.5 bg-gray-800 rounded-full mt-2 overflow-hidden">
+                  <div 
+                    className="h-full bg-indigo-500 rounded-full transition-all duration-1000" 
+                    style={{ width: `${Math.min(100, stats.savingsRate)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1003,7 +1055,7 @@ export default function App() {
             <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl">
               <div className="flex items-center gap-2 mb-6">
                 <PieChart size={18} className="text-indigo-400" />
-                <h2 className="text-lg font-semibold">Spending by Category {selectedMonth !== 'all' && `(${formatMonthKey(selectedMonth)})`}</h2>
+                <h2 className="text-lg font-semibold">Spending by Category</h2>
               </div>
               <div className="h-[300px] flex justify-center">
                 <Doughnut 
@@ -1020,43 +1072,25 @@ export default function App() {
                 />
               </div>
             </div>
-            {selectedMonth === 'all' ? (
-              <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl">
-                <div className="flex items-center gap-2 mb-6">
-                  <BarChart3 size={18} className="text-indigo-400" />
-                  <h2 className="text-lg font-semibold">Monthly Trend</h2>
-                </div>
-                <div className="h-[300px]">
-                  <Bar 
-                    data={trendChartData}
-                    options={{
-                      maintainAspectRatio: false,
-                      scales: {
-                        y: { grid: { color: '#2a2a2a' }, ticks: { color: '#9ca3af' } },
-                        x: { grid: { display: false }, ticks: { color: '#9ca3af' } }
-                      },
-                      plugins: { legend: { display: false } }
-                    }}
-                  />
-                </div>
+            <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl">
+              <div className="flex items-center gap-2 mb-6">
+                <BarChart3 size={18} className="text-indigo-400" />
+                <h2 className="text-lg font-semibold">Monthly Trend</h2>
               </div>
-            ) : (
-              <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl flex flex-col items-center justify-center text-center space-y-4">
-                <Calendar size={48} className="text-gray-700" />
-                <div>
-                  <h3 className="text-lg font-medium text-gray-300">Viewing {formatMonthKey(selectedMonth)}</h3>
-                  <p className="text-sm text-gray-500 max-w-xs mx-auto">
-                    The summary and category breakdown above are now filtered to this specific month.
-                  </p>
-                </div>
-                <button 
-                  onClick={() => setSelectedMonth('all')}
-                  className="text-indigo-400 text-sm hover:underline"
-                >
-                  Back to All Time Trend
-                </button>
+              <div className="h-[300px]">
+                <Bar 
+                  data={trendChartData}
+                  options={{
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: { grid: { color: '#2a2a2a' }, ticks: { color: '#9ca3af' } },
+                      x: { grid: { display: false }, ticks: { color: '#9ca3af' } }
+                    },
+                    plugins: { legend: { display: false } }
+                  }}
+                />
               </div>
-            )}
+            </div>
           </section>
         )}
 
@@ -1099,7 +1133,7 @@ export default function App() {
               <TableIcon size={18} className="text-indigo-400" />
               <h2 className="text-lg font-semibold">Transactions</h2>
             </div>
-            <div className="flex items-center gap-4 flex-1 max-w-2xl">
+            <div className="flex items-center gap-4 flex-1 max-w-3xl">
               <div className="relative flex-1">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
                 <input 
@@ -1110,6 +1144,18 @@ export default function App() {
                   className="w-full bg-[#2a2a2a] border border-gray-700 rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
+              <button 
+                onClick={() => setHideTransfers(!hideTransfers)}
+                className={cn(
+                  "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                  hideTransfers 
+                    ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-400 hover:bg-indigo-600/30" 
+                    : "bg-[#2a2a2a] border-gray-700 text-gray-400 hover:bg-[#333]"
+                )}
+              >
+                <RefreshCcw size={14} className={cn(hideTransfers && "text-indigo-400")} />
+                <span>{hideTransfers ? "Transfers Hidden" : "Show Transfers"}</span>
+              </button>
               {isFiltered && (
                 <button 
                   onClick={clearFilters}
@@ -1191,18 +1237,43 @@ export default function App() {
               <tbody className="divide-y divide-gray-800">
                 {filteredTransactions.length > 0 ? (
                   filteredTransactions.map((t) => (
-                    <tr key={t.id} className="hover:bg-[#252525] transition-colors">
-                      <td className="px-6 py-4 text-sm text-gray-300 whitespace-nowrap">{t.date}</td>
-                      <td className="px-6 py-4 text-sm font-medium">{t.description}</td>
+                    <tr key={t.id} className="hover:bg-[#252525] transition-colors group/row">
+                      <td className="px-6 py-4 text-sm text-gray-400 font-mono whitespace-nowrap">{t.date}</td>
                       <td className="px-6 py-4">
-                        <span className="text-xs bg-gray-800 text-gray-300 px-2 py-1 rounded">
+                        <div className="flex flex-col">
+                          <span className="text-sm font-medium text-gray-200">{t.description}</span>
+                          {t.category === 'Transfer' && (
+                            <span className="text-[10px] text-gray-500 italic">Internal Transfer / Pot Movement</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className={cn(
+                          "text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wider",
+                          t.category === 'Income' ? "bg-green-900/30 text-green-400 border border-green-900/50" :
+                          t.category === 'Savings & Investments' ? "bg-amber-900/30 text-amber-400 border border-amber-900/50" :
+                          t.category === 'Transfer' ? "bg-gray-800 text-gray-400 border border-gray-700" :
+                          "bg-indigo-900/20 text-indigo-400 border border-indigo-900/50"
+                        )}>
                           {t.category}
                         </span>
                       </td>
-                      <td className={cn("px-6 py-4 text-sm font-bold whitespace-nowrap", t.amount >= 0 ? "text-green-400" : "text-red-400")}>
+                      <td className={cn(
+                        "px-6 py-4 text-sm font-bold text-right font-mono whitespace-nowrap",
+                        t.amount > 0 ? "text-green-400" : "text-gray-200"
+                      )}>
                         {formatCurrency(t.amount)}
                       </td>
-                      <td className="px-6 py-4 text-xs text-gray-500">{t.bank}</td>
+                      <td className="px-6 py-4 text-right">
+                        <span className={cn(
+                          "text-[10px] px-1.5 py-0.5 rounded font-bold",
+                          t.bank === 'Barclaycard' ? "bg-blue-900/20 text-blue-400" :
+                          t.bank === 'Amex' ? "bg-indigo-900/20 text-indigo-400" :
+                          "bg-teal-900/20 text-teal-400"
+                        )}>
+                          {t.bank.toUpperCase()}
+                        </span>
+                      </td>
                     </tr>
                   ))
                 ) : (
