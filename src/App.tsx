@@ -141,6 +141,35 @@ function autoCategorize(description: string, amount: number, bankCategory: strin
   return bankCategory !== 'Uncategorized' ? bankCategory : 'Uncategorized';
 }
 
+function detectBank(data: string[][]): BankType | null {
+  if (data.length === 0) return null;
+  
+  const firstRow = data[0].map(h => h.toLowerCase());
+  
+  // Starling detection: Date, Counterparty, Reference, Type, Amount (GBP), Balance (GBP), Category, Note
+  if (firstRow.includes('counterparty') && firstRow.includes('amount (gbp)')) {
+    return 'Starling';
+  }
+  
+  // Amex detection: Date, Description, Amount, Extended Details, ...
+  if (firstRow.includes('extended details') && firstRow.includes('description')) {
+    return 'Amex';
+  }
+  
+  // Barclaycard detection: Date, Description, Category, Amount
+  const allText = data.slice(0, 5).flat().join(' ').toLowerCase();
+  if (allText.includes('barclaycard') || allText.includes('account number') || allText.includes('card number')) {
+      return 'Barclaycard';
+  }
+
+  // Fallback: Check column counts
+  if (data[0].length >= 11) return 'Amex';
+  if (data[0].length >= 8) return 'Starling';
+  if (data[0].length >= 7) return 'Barclaycard';
+
+  return null;
+}
+
 function normalizeDate(dateStr: string, bank: BankType): string {
   if (bank === 'Barclaycard') {
     // Format: 23 Feb 26
@@ -217,7 +246,6 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
 export default function App() {
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
   const [uploadLogs, setUploadLogs] = useState<UploadLog[]>([]);
-  const [selectedBank, setSelectedBank] = useState<BankType>('Barclaycard');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -294,42 +322,54 @@ export default function App() {
         const data = results.data as string[][];
         const parsedTxs: Omit<Transaction, 'id'>[] = [];
         
-        if (selectedBank === 'Barclaycard') {
+        const bank = detectBank(data);
+        if (!bank) {
+          setIsAnalyzing(false);
+          showAlert("Unknown Format", "Could not automatically detect the bank format. Please ensure you are uploading a valid CSV from Starling, Amex, or Barclaycard.");
+          return;
+        }
+
+        if (bank === 'Barclaycard') {
           data.forEach((row) => {
             if (row.length < 7 || !row[0]) return;
+            const amount = normalizeAmount(row[6], 'Barclaycard');
+            if (isNaN(amount) || (amount === 0 && row[0].toLowerCase().includes('date'))) return; // Skip headers
+            
             const rawDesc = row[1];
             const rawCat = row[4] || 'Uncategorized';
             parsedTxs.push({
               date: normalizeDate(row[0], 'Barclaycard'),
               description: rawDesc,
-              amount: normalizeAmount(row[6], 'Barclaycard'),
-              category: autoCategorize(rawDesc, normalizeAmount(row[6], 'Barclaycard'), rawCat),
+              amount: amount,
+              category: autoCategorize(rawDesc, amount, rawCat),
               bank: 'Barclaycard'
             });
           });
-        } else if (selectedBank === 'Amex') {
+        } else if (bank === 'Amex') {
           data.slice(1).forEach((row) => {
             if (row.length < 11 || !row[0]) return;
             const rawDesc = row[1];
             const rawCat = row[10] ? row[10].split('-')[0].trim() : 'Uncategorized';
+            const amount = normalizeAmount(row[2], 'Amex');
             parsedTxs.push({
               date: normalizeDate(row[0], 'Amex'),
               description: rawDesc,
-              amount: normalizeAmount(row[2], 'Amex'),
-              category: autoCategorize(rawDesc, normalizeAmount(row[2], 'Amex'), rawCat),
+              amount: amount,
+              category: autoCategorize(rawDesc, amount, rawCat),
               bank: 'Amex'
             });
           });
-        } else if (selectedBank === 'Starling') {
+        } else if (bank === 'Starling') {
           data.slice(1).forEach((row) => {
             if (row.length < 8 || !row[0]) return;
             const rawDesc = row[1];
             const rawCat = row[6] ? row[6].replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'Uncategorized';
+            const amount = normalizeAmount(row[4], 'Starling');
             parsedTxs.push({
               date: normalizeDate(row[0], 'Starling'),
               description: rawDesc,
-              amount: normalizeAmount(row[4], 'Starling'),
-              category: autoCategorize(rawDesc, normalizeAmount(row[4], 'Starling'), rawCat),
+              amount: amount,
+              category: autoCategorize(rawDesc, amount, rawCat),
               bank: 'Starling'
             });
           });
@@ -381,7 +421,7 @@ export default function App() {
           setUploadLogs(prev => [
             {
               id: logId,
-              bank: selectedBank,
+              bank: bank,
               fileName: file.name,
               transactionCount: parsedTxs.length,
               uploadedAt: new Date().toISOString(),
@@ -740,6 +780,25 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <div className="relative">
+              <input 
+                type="file" 
+                accept=".csv"
+                onChange={handleFileUpload}
+                className="hidden" 
+                id="header-csv-upload"
+              />
+              <label 
+                htmlFor="header-csv-upload"
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg cursor-pointer hover:bg-indigo-700 transition-colors",
+                  isAnalyzing && "opacity-50 cursor-not-allowed pointer-events-none"
+                )}
+              >
+                <Upload size={18} />
+                <span>{isAnalyzing ? "Analyzing..." : "Upload CSV"}</span>
+              </label>
+            </div>
             <button 
               onClick={() => setShowHistory(!showHistory)}
               className={cn(
@@ -748,7 +807,7 @@ export default function App() {
               )}
             >
               <RefreshCcw size={18} className={cn(showHistory && "animate-spin-once")} />
-              <span>{showHistory ? "Hide History" : "Show History"}</span>
+              <span>{showHistory ? "History" : "History"}</span>
             </button>
             <button 
               onClick={clearData}
@@ -763,47 +822,6 @@ export default function App() {
             </button>
           </div>
         </header>
-
-        {/* Month Filter & Upload Section */}
-        <div className="grid grid-cols-1 gap-6">
-          <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
-            <div className="flex flex-col md:flex-row items-end gap-6">
-              <div className="w-full md:w-64 space-y-2">
-                <label className="text-sm font-medium text-gray-400">Select Bank Format</label>
-                <select 
-                  value={selectedBank}
-                  onChange={(e) => setSelectedBank(e.target.value as BankType)}
-                  className="w-full bg-[#2a2a2a] border border-gray-700 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  {BANK_FORMATS.map(bank => (
-                    <option key={bank} value={bank}>{bank}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex-1 w-full space-y-2">
-                <label className="text-sm font-medium text-gray-400">Upload CSV File</label>
-                <div className="relative">
-                  <input 
-                    type="file" 
-                    accept=".csv"
-                    onChange={handleFileUpload}
-                    className="hidden" 
-                    id="csv-upload"
-                  />
-                  <label 
-                    htmlFor="csv-upload"
-                    className="flex items-center justify-center gap-3 w-full bg-[#2a2a2a] border-2 border-dashed border-gray-700 rounded-lg px-6 py-8 cursor-pointer hover:border-indigo-500 hover:bg-[#333] transition-all group"
-                  >
-                    <Upload className="text-gray-500 group-hover:text-indigo-400" />
-                    <span className="text-gray-400 group-hover:text-gray-200">
-                      {isAnalyzing ? "Processing..." : "Click to upload or drag and drop"}
-                    </span>
-                  </label>
-                </div>
-              </div>
-            </div>
-          </section>
-        </div>
 
         {/* Summary Cards */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
