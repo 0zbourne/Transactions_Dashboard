@@ -86,7 +86,7 @@ interface Subscription {
 
 // --- Constants ---
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  'Income': ['salary', 'wage', 'payroll', 'employer', 'dividend', 'interest', 'refund', 'cashback'],
+  'Income': ['salary', 'wage', 'payroll', 'employer', 'dividend', 'interest', 'refund', 'cashback', 'inkorp', 'global shares', 'understan re ltd', 'pay'],
   'Savings & Investments': ['trading 212', 't212', 'vanguard', 'isa', 'investment', 'savings', 'pension', 'crypto', 'coinbase', 'binance'],
   'Transfer': ['direct debit', 'payment received', 'amex', 'american express', 'barclaycard', 'credit card', 'transfer', 'pot', 'space', 'to starling', 'from starling'],
   'Groceries': ['tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'co-op', 'coop', '7 11', 'waitrose', 'marks & spencer', 'm&s'],
@@ -127,12 +127,46 @@ function autoCategorize(description: string, amount: number, bankCategory: strin
     return 'Savings & Investments';
   }
 
+  // If it's a positive amount (credit)
+  if (amount > 0) {
+    // Check for specific income sources first (high confidence)
+    const highConfidenceIncome = ['wetherspoon', 'j d wetherspoon', 'inkorp', 'global shares', 'understan re ltd'];
+    if (highConfidenceIncome.some(kw => desc.includes(kw))) {
+      return 'Income';
+    }
+
+    // Check for standard income keywords
+    // We check for 'pay' specifically as a word to avoid matching 'payment' in transfers
+    const incomeKeywords = CATEGORY_KEYWORDS['Income'];
+    if (incomeKeywords.some(kw => {
+      if (kw === 'pay') {
+        // Match 'pay' as a standalone word or at the start/end of a string
+        return desc.split(/\s+/).includes('pay');
+      }
+      return desc.includes(kw.toLowerCase());
+    })) {
+      return 'Income';
+    }
+
+    // If it's a positive amount but doesn't match income keywords, 
+    // it's likely a transfer from a friend or a refund.
+    // We check for transfer keywords.
+    const transferKeywords = CATEGORY_KEYWORDS['Transfer'];
+    if (transferKeywords.some(kw => desc.includes(kw.toLowerCase()))) {
+      return 'Transfer';
+    }
+
+    // Default for positive amounts that aren't clearly income: Transfer
+    // This prevents friends/family payments from inflating income stats.
+    return 'Transfer';
+  }
+
+  // For negative amounts (spending)
   for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    // Skip Income category for spending unless it's a known keyword (like a refund, but we handled credits above)
+    if (category === 'Income') continue;
+    
     if (keywords.some(kw => desc.includes(kw.toLowerCase()))) {
-      // If it's a positive amount and matches income keywords, it's income
-      if (category === 'Income' && amount <= 0) continue;
-      // If it's a negative amount and matches income keywords (like a refund), it might be uncategorized or a refund
-      if (category === 'Transfer') return 'Transfer';
       return category;
     }
   }
@@ -417,14 +451,16 @@ export default function App() {
         } else if (bank === 'Starling') {
           data.slice(1).forEach((row) => {
             if (row.length < 8 || !row[0]) return;
-            const rawDesc = row[1];
+            const counterparty = row[1] || '';
+            const reference = row[2] || '';
+            const fullDesc = `${counterparty} ${reference}`.trim();
             const rawCat = row[6] ? row[6].replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'Uncategorized';
             const amount = normalizeAmount(row[4], 'Starling');
             parsedTxs.push({
               date: normalizeDate(row[0], 'Starling'),
-              description: rawDesc,
+              description: fullDesc,
               amount: amount,
-              category: autoCategorize(rawDesc, amount, rawCat),
+              category: autoCategorize(fullDesc, amount, rawCat),
               bank: 'Starling'
             });
           });
@@ -628,9 +664,9 @@ export default function App() {
     const monthlySpent = Math.abs(totalSpent) / monthsInData;
     const monthlyNet = (totalIncome + totalSpent - totalSavings) / monthsInData;
 
-    // Yearly estimates (annualized based on available data)
-    const yearlyIncome = monthlyIncome * 12;
-    const yearlySavings = monthlySavings * 12;
+    // Yearly totals (actual sum of filtered transactions in the 12-month window)
+    const yearlyIncome = totalIncome;
+    const yearlySavings = totalSavings;
     const savingsRate = yearlyIncome > 0 ? (yearlySavings / yearlyIncome) * 100 : 0;
 
     return {
@@ -934,14 +970,14 @@ export default function App() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
               <div className="space-y-1">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Est. Yearly Income (After Tax)</p>
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Total Income (Last 12m)</p>
                 <p className="text-3xl font-bold text-white">{formatCurrency(stats.yearlyIncome)}</p>
-                <p className="text-[10px] text-gray-400 mt-1">Based on identified salary deposits</p>
+                <p className="text-[10px] text-gray-400 mt-1">Actual total income in analysis period</p>
               </div>
               <div className="space-y-1">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Est. Yearly Savings/Investments</p>
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Total Savings (Last 12m)</p>
                 <p className="text-3xl font-bold text-amber-400">{formatCurrency(stats.yearlySavings)}</p>
-                <p className="text-[10px] text-gray-400 mt-1">Including Trading 212 contributions</p>
+                <p className="text-[10px] text-gray-400 mt-1">Actual total saved in analysis period</p>
               </div>
               <div className="space-y-1">
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Target Savings Rate</p>
