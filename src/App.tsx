@@ -94,7 +94,8 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   'Eating Out': ['wetherspoon', 'nandos', 'starbucks', 'costa', 'mcdonalds', 'subway', 'restaurant', 'bar', 'pub', 'deliveroo', 'just eat', 'uber eats'],
   'Shopping': ['amazon', 'amzn', 'argos', 'boots', 'next', 'zara', 'h&m', 'ebay', 'apple'],
   'Entertainment': ['netflix', 'spotify', 'disney', 'cinema', 'steam', 'playstation', 'xbox'],
-  'Bills': ['smarty', 'virgin media', 'bt ', 'water', 'electric', 'gas', 'council', 'insurance', 'rent', 'mortgage'],
+  'Rent': ['rent', 'letting', 'lets', 'estate agent', 'property management', 'landlord', 'residential'],
+  'Bills': ['smarty', 'virgin media', 'bt ', 'water', 'electric', 'gas', 'council', 'insurance', 'mortgage'],
   'Subscriptions': ['proton', 'porkbun', 'google play', 'icloud', 'adobe', 'microsoft', 'chatgpt', 'openai']
 };
 
@@ -162,6 +163,15 @@ function autoCategorize(description: string, amount: number, bankCategory: strin
   }
 
   // For negative amounts (spending)
+  
+  // Rent detection via address patterns (high priority for large recurring costs)
+  const addressKeywords = ['flat', 'apartment', 'house', 'street', 'road', 'avenue', 'lane', 'drive', 'court', 'gardens', 'square', 'terrace', 'close', 'mews', 'place', 'hill', 'grove', 'park', 'view', 'crescent', 'walk'];
+  const addressRegex = new RegExp(`\\b(${addressKeywords.join('|')})\\b`, 'i');
+  // Rent is typically a significant amount
+  if (addressRegex.test(desc) && Math.abs(amount) > 200) {
+    return 'Rent';
+  }
+
   for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
     // Skip Income category for spending unless it's a known keyword (like a refund, but we handled credits above)
     if (category === 'Income') continue;
