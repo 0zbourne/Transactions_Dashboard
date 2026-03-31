@@ -1,5 +1,5 @@
 {
-  "name": "Transaction Dashboard MVP",
-  "description": "A unified dashboard for Barclaycard, Amex, and Starling bank transactions with auto-categorization and subscription detection.",
+  "name": "1-Year Trailing Transactions Dashboard",
+  "description": "A local-first dashboard for analyzing the last 12 months of bank transactions from Barclaycard, Amex, and Starling.",
   "requestFramePermissions": []
 }

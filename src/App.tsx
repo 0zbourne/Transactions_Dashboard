@@ -30,95 +30,17 @@ import {
   Trash2,
   AlertCircle,
   Calendar,
-  LogIn,
-  LogOut,
-  Cloud,
-  CloudOff,
   ChevronUp,
   ChevronDown,
-  Filter
+  Filter,
+  CloudOff
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { auth, db } from './firebase';
-import { 
-  onAuthStateChanged, 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  signOut,
-  User
-} from 'firebase/auth';
-import { 
-  collection, 
-  onSnapshot, 
-  query, 
-  orderBy, 
-  writeBatch, 
-  doc, 
-  setDoc,
-  serverTimestamp,
-  deleteDoc,
-  getDocs,
-  where,
-  arrayUnion,
-  arrayRemove,
-  updateDoc
-} from 'firebase/firestore';
 
 // --- Utility ---
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
-}
-
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
 }
 
 ChartJS.register(
@@ -280,12 +202,10 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
 export default function App() {
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
   const [uploadLogs, setUploadLogs] = useState<UploadLog[]>([]);
-  const [user, setUser] = useState<User | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
   const [selectedBank, setSelectedBank] = useState<BankType>('Barclaycard');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedMonth, setSelectedMonth] = useState<string>('all'); // Format: YYYY-MM
+  const [selectedMonth, setSelectedMonth] = useState<string>('trailing12'); // Format: YYYY-MM or 'trailing12'
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedBankFilter, setSelectedBankFilter] = useState<string>('all');
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
@@ -318,88 +238,36 @@ export default function App() {
     return Array.from(bks).sort();
   }, [allTransactions]);
 
-  // Auth Listener
+  // Local Storage Sync
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setIsAuthReady(true);
-    });
-    return () => unsubscribe();
+    const savedTxs = localStorage.getItem('transactions');
+    const savedLogs = localStorage.getItem('upload_logs');
+    
+    if (savedTxs) {
+      try {
+        setAllTransactions(JSON.parse(savedTxs));
+      } catch (e) {
+        console.error("Failed to parse saved transactions", e);
+      }
+    }
+    
+    if (savedLogs) {
+      try {
+        setUploadLogs(JSON.parse(savedLogs));
+      } catch (e) {
+        console.error("Failed to parse saved upload logs", e);
+      }
+    }
   }, []);
 
-  // Firestore Sync
+  // Save to Local Storage whenever data changes
   useEffect(() => {
-    if (!user) {
-      // Load from localStorage if not logged in
-      const saved = localStorage.getItem('transactions');
-      if (saved) {
-        try {
-          setAllTransactions(JSON.parse(saved));
-        } catch (e) {
-          console.error("Failed to parse saved transactions", e);
-        }
-      }
-      return;
-    }
+    localStorage.setItem('transactions', JSON.stringify(allTransactions));
+  }, [allTransactions]);
 
-    // Real-time sync from Firestore
-    const q = query(
-      collection(db, `users/${user.uid}/transactions`),
-      orderBy('date', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const txs: Transaction[] = [];
-      snapshot.forEach((doc) => {
-        txs.push({ id: doc.id, ...doc.data() } as Transaction);
-      });
-      setAllTransactions(txs);
-      // Also update localStorage as a cache
-      localStorage.setItem('transactions', JSON.stringify(txs));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, `users/${user.uid}/transactions`);
-    });
-
-    // Sync Upload Logs
-    const logsQ = query(
-      collection(db, `users/${user.uid}/upload_logs`),
-      orderBy('uploadedAt', 'desc')
-    );
-
-    const unsubscribeLogs = onSnapshot(logsQ, (snapshot) => {
-      const logs: UploadLog[] = [];
-      snapshot.forEach((doc) => {
-        logs.push({ id: doc.id, ...doc.data() } as UploadLog);
-      });
-      setUploadLogs(logs);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, `users/${user.uid}/upload_logs`);
-    });
-
-    return () => {
-      unsubscribe();
-      unsubscribeLogs();
-    };
-  }, [user]);
-
-  const handleLogin = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error("Login failed", error);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      setAllTransactions([]);
-      localStorage.removeItem('transactions');
-    } catch (error) {
-      console.error("Logout failed", error);
-    }
-  };
+  useEffect(() => {
+    localStorage.setItem('upload_logs', JSON.stringify(uploadLogs));
+  }, [uploadLogs]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -407,7 +275,7 @@ export default function App() {
 
     setIsAnalyzing(true);
     Papa.parse(file, {
-      complete: async (results) => {
+      complete: (results) => {
         const data = results.data as string[][];
         const parsedTxs: Omit<Transaction, 'id'>[] = [];
         
@@ -466,13 +334,13 @@ export default function App() {
         const periodEnd = maxDate !== -Infinity ? new Date(maxDate).toISOString() : null;
 
         const logId = `log_${Date.now()}`;
-        const logRef = user ? doc(db, `users/${user.uid}/upload_logs`, logId) : null;
 
-        const processUpload = async () => {
-          if (user) {
-            // Upload to Firestore with fingerprinting
-            const batch = writeBatch(db);
-            const occurrenceMap: Record<string, number> = {};
+        const processUpload = () => {
+          const occurrenceMap: Record<string, number> = {};
+          
+          setAllTransactions(prev => {
+            const existingIds = new Set(prev.map(t => t.id));
+            const newTransactions: Transaction[] = [];
             
             parsedTxs.forEach(tx => {
               const key = `${tx.date}|${tx.description}|${tx.amount}|${tx.bank}`;
@@ -480,83 +348,55 @@ export default function App() {
               occurrenceMap[key] = occurrence + 1;
               
               const fingerprint = generateFingerprint(tx, occurrence);
-              const docRef = doc(db, `users/${user.uid}/transactions`, fingerprint);
-              batch.set(docRef, {
-                ...tx,
-                id: fingerprint, // Ensure ID is in the document data for rules validation
-                uid: user.uid,
-                uploadLogIds: arrayUnion(logId),
-                createdAt: serverTimestamp()
-              }, { merge: true });
+              if (!existingIds.has(fingerprint)) {
+                newTransactions.push({ 
+                  ...tx, 
+                  id: fingerprint,
+                  uploadLogIds: [logId]
+                });
+              } else {
+                // If it exists, we should ideally add the logId to it, but for local storage
+                // we'll keep it simple and just skip.
+              }
             });
             
-            if (logRef) {
-              batch.set(logRef, {
-                id: logId,
-                bank: selectedBank,
-                fileName: file.name,
-                transactionCount: parsedTxs.length,
-                uploadedAt: serverTimestamp(),
-                periodStart,
-                periodEnd,
-                uid: user.uid
-              });
-            }
-            
-            try {
-              setIsAnalyzing(true);
-              await batch.commit();
-              setIsAnalyzing(false);
-              showAlert("Upload Complete", `Successfully uploaded ${parsedTxs.length} transactions.`);
-            } catch (error) {
-              setIsAnalyzing(false);
-              handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/transactions`);
-            }
-          } else {
-            // Fallback to local state if not logged in
-            // Use fingerprinting for local state too to prevent duplicates
-            const occurrenceMap: Record<string, number> = {};
-            
-            setAllTransactions(prev => {
-              const existingIds = new Set(prev.map(t => t.id));
-              const newTransactions: Transaction[] = [];
-              
-              parsedTxs.forEach(tx => {
-                const key = `${tx.date}|${tx.description}|${tx.amount}|${tx.bank}`;
-                const occurrence = occurrenceMap[key] || 0;
-                occurrenceMap[key] = occurrence + 1;
-                
-                const fingerprint = generateFingerprint(tx, occurrence);
-                if (!existingIds.has(fingerprint)) {
-                  newTransactions.push({ ...tx, id: fingerprint });
-                }
-              });
-              
-              return [...prev, ...newTransactions];
-            });
-            showAlert("Upload Complete", `Successfully added ${parsedTxs.length} transactions locally.`);
-          }
+            return [...prev, ...newTransactions];
+          });
+
+          setUploadLogs(prev => [
+            {
+              id: logId,
+              bank: selectedBank,
+              fileName: file.name,
+              transactionCount: parsedTxs.length,
+              uploadedAt: new Date().toISOString(),
+              periodStart: periodStart || undefined,
+              periodEnd: periodEnd || undefined,
+              uid: 'local'
+            },
+            ...prev
+          ]);
+
           setIsAnalyzing(false);
+          showAlert("Upload Complete", `Successfully added ${parsedTxs.length} transactions locally.`);
           e.target.value = '';
         };
 
-        if (user) {
-          // Check for duplicate upload log
-          const isDuplicateUpload = uploadLogs.some(log => 
-            log.fileName === file.name && 
-            log.transactionCount === parsedTxs.length &&
-            log.periodStart === periodStart &&
-            log.periodEnd === periodEnd
-          );
+        // Check for duplicate upload log
+        const isDuplicateUpload = uploadLogs.some(log => 
+          log.fileName === file.name && 
+          log.transactionCount === parsedTxs.length &&
+          log.periodStart === periodStart &&
+          log.periodEnd === periodEnd
+        );
 
-          if (isDuplicateUpload) {
-            showConfirm(
-              "Duplicate Upload Detected",
-              `It looks like you've already uploaded "${file.name}" for this period. Uploading it again won't create duplicate transactions, but it will add another entry to your upload history. Do you want to proceed?`,
-              processUpload
-            );
-            return;
-          }
+        if (isDuplicateUpload) {
+          showConfirm(
+            "Duplicate Upload Detected",
+            `It looks like you've already uploaded "${file.name}" for this period. Uploading it again won't create duplicate transactions, but it will add another entry to your upload history. Do you want to proceed?`,
+            processUpload
+          );
+          return;
         }
 
         processUpload();
@@ -569,46 +409,16 @@ export default function App() {
     });
   };
 
-  const clearData = async () => {
+  const clearData = () => {
     showConfirm(
       "Clear All Data",
       "Are you sure you want to clear all transaction and history data? This action cannot be undone.",
-      async () => {
-        if (user) {
-          try {
-            setIsAnalyzing(true);
-            
-            // Clear Transactions in chunks (Firestore batch limit is 500)
-            const txSnapshot = await getDocs(collection(db, `users/${user.uid}/transactions`));
-            const txDocs = txSnapshot.docs;
-            
-            for (let i = 0; i < txDocs.length; i += 450) {
-              const batch = writeBatch(db);
-              txDocs.slice(i, i + 450).forEach(d => batch.delete(d.ref));
-              await batch.commit();
-            }
-
-            // Clear Logs in chunks
-            const logSnapshot = await getDocs(collection(db, `users/${user.uid}/upload_logs`));
-            const logDocs = logSnapshot.docs;
-            
-            for (let i = 0; i < logDocs.length; i += 450) {
-              const batch = writeBatch(db);
-              logDocs.slice(i, i + 450).forEach(d => batch.delete(d.ref));
-              await batch.commit();
-            }
-
-            setIsAnalyzing(false);
-            showAlert("Data Cleared", "All your transaction and history data has been removed.");
-          } catch (error) {
-            setIsAnalyzing(false);
-            handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/transactions`);
-          }
-        }
+      () => {
         setAllTransactions([]);
         setUploadLogs([]);
         localStorage.removeItem('transactions');
-        setSelectedMonth('all');
+        localStorage.removeItem('upload_logs');
+        setSelectedMonth('trailing12');
       }
     );
   };
@@ -628,7 +438,14 @@ export default function App() {
     let result = allTransactions;
 
     // Month filter
-    if (selectedMonth !== 'all') {
+    if (selectedMonth === 'trailing12') {
+      const now = new Date();
+      const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1).getTime();
+      result = result.filter(t => {
+        const [d, m, y] = t.date.split('/').map(Number);
+        return new Date(y, m - 1, d).getTime() >= twelveMonthsAgo;
+      });
+    } else if (selectedMonth !== 'all') {
       result = result.filter(t => {
         const [d, m, y] = t.date.split('/');
         return `${y}-${m}` === selectedMonth;
@@ -793,53 +610,14 @@ export default function App() {
     return months;
   }, []);
 
-  const handleDeleteLog = async (logId: string) => {
+  const handleDeleteLog = (logId: string) => {
     showConfirm(
       "Delete Upload Log",
-      "Are you sure you want to delete this upload log? This will also delete all transactions that were ONLY part of this statement. Transactions that appear in other uploaded statements will be kept.",
-      async () => {
-        if (user) {
-          try {
-            setIsAnalyzing(true);
-            
-            // 1. Find all transactions associated with this log
-            const txQuery = query(
-              collection(db, `users/${user.uid}/transactions`),
-              where('uploadLogIds', 'array-contains', logId)
-            );
-            const txSnapshot = await getDocs(txQuery);
-            const txDocs = txSnapshot.docs;
-            
-            // Process transactions in chunks (Firestore batch limit is 500)
-            for (let i = 0; i < txDocs.length; i += 450) {
-              const batch = writeBatch(db);
-              txDocs.slice(i, i + 450).forEach((transactionDoc) => {
-                const data = transactionDoc.data() as Transaction;
-                const currentLogIds = data.uploadLogIds || [];
-                
-                if (currentLogIds.length <= 1) {
-                  // This transaction only belongs to this log, delete it
-                  batch.delete(transactionDoc.ref);
-                } else {
-                  // This transaction belongs to other logs too, just remove this logId
-                  batch.update(transactionDoc.ref, {
-                    uploadLogIds: arrayRemove(logId)
-                  });
-                }
-              });
-              await batch.commit();
-            }
-            
-            // 2. Delete the log itself
-            await deleteDoc(doc(db, `users/${user.uid}/upload_logs`, logId));
-            
-            setIsAnalyzing(false);
-            showAlert("Log Deleted", "The upload log and its unique transactions have been removed.");
-          } catch (error) {
-            setIsAnalyzing(false);
-            handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/upload_logs`);
-          }
-        }
+      "Are you sure you want to delete this upload log? This will also delete all transactions associated with this statement.",
+      () => {
+        setAllTransactions(prev => prev.filter(t => !t.uploadLogIds?.includes(logId)));
+        setUploadLogs(prev => prev.filter(log => log.id !== logId));
+        showAlert("Log Deleted", "The upload log and its transactions have been removed.");
       }
     );
   };
@@ -850,6 +628,7 @@ export default function App() {
 
   const formatMonthKey = (key: string) => {
     if (key === 'all') return 'All Time';
+    if (key === 'trailing12') return 'Last 12 Months';
     const [y, m] = key.split('-');
     return new Date(parseInt(y), parseInt(m) - 1).toLocaleString('default', { month: 'long', year: 'numeric' });
   };
@@ -866,11 +645,11 @@ export default function App() {
     }));
   };
 
-  const isFiltered = searchTerm !== '' || selectedMonth !== 'all' || selectedCategory !== 'all' || selectedBankFilter !== 'all';
+  const isFiltered = searchTerm !== '' || (selectedMonth !== 'all' && selectedMonth !== 'trailing12') || selectedCategory !== 'all' || selectedBankFilter !== 'all';
 
   const clearFilters = () => {
     setSearchTerm('');
-    setSelectedMonth('all');
+    setSelectedMonth('trailing12');
     setSelectedCategory('all');
     setSelectedBankFilter('all');
   };
@@ -914,15 +693,9 @@ export default function App() {
         {/* Header */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">Transaction Dashboard</h1>
+            <h1 className="text-3xl font-bold tracking-tight">1-Year Trailing Dashboard</h1>
             <div className="flex items-center gap-2 mt-1">
-              <p className="text-gray-400">Unified view of your bank statements</p>
-              {user && (
-                <div className="flex items-center gap-1.5 px-2 py-0.5 bg-green-900/20 text-green-400 text-xs rounded-full border border-green-900/30">
-                  <Cloud size={12} />
-                  <span>Cloud Synced</span>
-                </div>
-              )}
+              <p className="text-gray-400">Local-only view of your bank statements</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -936,28 +709,6 @@ export default function App() {
               <RefreshCcw size={18} className={cn(showHistory && "animate-spin-once")} />
               <span>{showHistory ? "Hide History" : "Show History"}</span>
             </button>
-            {isAuthReady && (
-              user ? (
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-gray-400 hidden sm:inline">{user.email}</span>
-                  <button 
-                    onClick={handleLogout}
-                    className="flex items-center gap-2 px-4 py-2 bg-[#2a2a2a] text-gray-300 border border-gray-700 rounded-lg hover:bg-[#333] transition-colors"
-                  >
-                    <LogOut size={18} />
-                    <span>Logout</span>
-                  </button>
-                </div>
-              ) : (
-                <button 
-                  onClick={handleLogin}
-                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-500/20"
-                >
-                  <LogIn size={18} />
-                  <span>Login with Google</span>
-                </button>
-              )
-            )}
             <button 
               onClick={clearData}
               disabled={isAnalyzing}
@@ -1016,6 +767,15 @@ export default function App() {
           <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl p-6">
             <label className="text-sm font-medium text-gray-400 block mb-4">Viewing Period</label>
             <div className="space-y-2 max-h-[140px] overflow-y-auto pr-2 custom-scrollbar">
+              <button 
+                onClick={() => setSelectedMonth('trailing12')}
+                className={cn(
+                  "w-full text-left px-4 py-2 rounded-lg transition-colors text-sm",
+                  selectedMonth === 'trailing12' ? "bg-indigo-600 text-white" : "bg-[#2a2a2a] text-gray-400 hover:bg-[#333]"
+                )}
+              >
+                Last 12 Months
+              </button>
               <button 
                 onClick={() => setSelectedMonth('all')}
                 className={cn(
@@ -1198,7 +958,7 @@ export default function App() {
                         <span className="text-xs font-bold text-indigo-400 uppercase">{log.bank}</span>
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] text-gray-500">
-                            {log.uploadedAt?.toDate ? log.uploadedAt.toDate().toLocaleDateString() : 'Just now'}
+                            {new Date(log.uploadedAt).toLocaleDateString()}
                           </span>
                           <button 
                             onClick={() => handleDeleteLog(log.id)}
