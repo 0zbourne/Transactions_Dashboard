@@ -87,6 +87,15 @@ interface Subscription {
   lastDate: string;
 }
 
+interface SavingInsight {
+  id: string;
+  title: string;
+  description: string;
+  potentialSaving: number;
+  type: 'subscription' | 'category' | 'behavior';
+  severity: 'low' | 'medium' | 'high';
+}
+
 // --- Constants ---
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
   'Income': ['salary', 'wage', 'payroll', 'employer', 'dividend', 'interest', 'inkorp', 'global shares', 'understan re ltd', 'pay'],
@@ -459,6 +468,82 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
   return subs.sort((a, b) => b.annualCost - a.annualCost);
 }
 
+function generateSavingInsights(transactions: Transaction[], subscriptions: Subscription[]): SavingInsight[] {
+  if (transactions.length === 0) return [];
+  
+  const insights: SavingInsight[] = [];
+  
+  // 1. Subscription Consolidation (Streaming)
+  const streamingKeywords = ['netflix', 'spotify', 'disney', 'prime video', 'hulu', 'hbo', 'apple tv', 'paramount', 'youtube premium'];
+  const streamingSubs = subscriptions.filter(s => 
+    streamingKeywords.some(k => s.merchant.toLowerCase().includes(k))
+  );
+  
+  if (streamingSubs.length > 2) {
+    const totalStreamingCost = streamingSubs.reduce((sum, s) => sum + (s.avgAmount), 0);
+    insights.push({
+      id: 'streaming-consolidation',
+      title: 'Consolidate Streaming Services',
+      description: `You have ${streamingSubs.length} active streaming subscriptions. Consider if you use all of them regularly.`,
+      potentialSaving: totalStreamingCost * 0.5, // Suggest saving half
+      type: 'subscription',
+      severity: 'medium'
+    });
+  }
+
+  // 2. High Eating Out
+  const eatingOutTxs = transactions.filter(t => t.category === 'Eating Out');
+  const totalSpent = Math.abs(transactions.reduce((sum, t) => sum + (t.amount < 0 ? t.amount : 0), 0));
+  const eatingOutSpent = Math.abs(eatingOutTxs.reduce((sum, t) => sum + t.amount, 0));
+  
+  if (totalSpent > 0 && eatingOutSpent / totalSpent > 0.15) {
+    insights.push({
+      id: 'high-eating-out',
+      title: 'Reduce Dining Out',
+      description: 'Your spending on Eating Out is over 15% of your total expenses. Cooking at home more often could save you a significant amount.',
+      potentialSaving: eatingOutSpent * 0.2, // Suggest saving 20%
+      type: 'category',
+      severity: 'high'
+    });
+  }
+
+  // 3. Small Leaks (Transactions < £10)
+  const smallTxs = transactions.filter(t => t.amount < 0 && Math.abs(t.amount) < 10);
+  const smallTxsTotal = Math.abs(smallTxs.reduce((sum, t) => sum + t.amount, 0));
+  if (smallTxs.length > 15) {
+    insights.push({
+      id: 'small-leaks',
+      title: 'Monitor "Small Leaks"',
+      description: `You had ${smallTxs.length} transactions under £10 this period. These small purchases add up to £${smallTxsTotal.toFixed(2)}.`,
+      potentialSaving: smallTxsTotal * 0.25,
+      type: 'behavior',
+      severity: 'medium'
+    });
+  }
+
+  // 4. Top Category Reduction (excluding Rent/Bills)
+  const categoryTotals: Record<string, number> = {};
+  transactions.forEach(t => {
+    if (t.amount < 0 && !['Rent', 'Bills', 'Transfer', 'Savings & Investments'].includes(t.category)) {
+      categoryTotals[t.category] = (categoryTotals[t.category] || 0) + Math.abs(t.amount);
+    }
+  });
+  
+  const topCategory = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0];
+  if (topCategory) {
+    insights.push({
+      id: 'top-category-reduction',
+      title: `Optimize ${topCategory[0]}`,
+      description: `${topCategory[0]} is your highest non-essential spending category (£${topCategory[1].toFixed(2)}). A 10% reduction is an easy win.`,
+      potentialSaving: topCategory[1] * 0.1,
+      type: 'category',
+      severity: 'low'
+    });
+  }
+
+  return insights;
+}
+
 // --- Components ---
 
 export default function App() {
@@ -473,6 +558,7 @@ export default function App() {
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
   const [showHistory, setShowHistory] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
+  const [showSavingsModal, setShowSavingsModal] = useState(false);
   const [modal, setModal] = useState<{
     show: boolean;
     title: string;
@@ -907,6 +993,14 @@ export default function App() {
 
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
+  const savingsInsights = useMemo(() => {
+    return generateSavingInsights(allTransactions, subscriptions);
+  }, [allTransactions, subscriptions]);
+
+  const totalPotentialSavings = useMemo(() => {
+    return savingsInsights.reduce((sum, i) => sum + i.potentialSaving, 0);
+  }, [savingsInsights]);
+
   const coverageStats = useMemo(() => {
     const daily: Record<string, Set<string>> = {
       'Barclaycard': new Set(),
@@ -1168,6 +1262,103 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Savings Insights Modal */}
+      <AnimatePresence>
+        {showSavingsModal && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowSavingsModal(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-2xl bg-[#1e1e1e] border border-gray-800 rounded-2xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-gray-800 flex items-center justify-between bg-gradient-to-r from-green-500/10 to-transparent">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-green-500/20 rounded-lg">
+                    <TrendingUp size={24} className="text-green-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-white">Savings Potential</h3>
+                    <p className="text-xs text-gray-400 mt-1">Simple ways to optimize your finances</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowSavingsModal(false)}
+                  className="p-2 hover:bg-gray-800 rounded-full transition-colors"
+                >
+                  <X size={20} className="text-gray-400" />
+                </button>
+              </div>
+
+              <div className="p-6 max-h-[60vh] overflow-y-auto space-y-4">
+                {savingsInsights.length === 0 ? (
+                  <div className="text-center py-12">
+                    <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-800 mb-4">
+                      <RefreshCcw size={32} className="text-gray-600" />
+                    </div>
+                    <p className="text-gray-400">No specific savings identified yet. Keep uploading statements!</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4">
+                    {savingsInsights.map((insight) => (
+                      <div 
+                        key={insight.id}
+                        className="bg-[#252525] border border-gray-800 rounded-xl p-5 hover:border-green-500/30 transition-all group"
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex items-center gap-3">
+                            <div className={cn(
+                              "p-2 rounded-lg",
+                              insight.severity === 'high' ? "bg-red-500/10 text-red-400" :
+                              insight.severity === 'medium' ? "bg-amber-500/10 text-amber-400" :
+                              "bg-indigo-500/10 text-indigo-400"
+                            )}>
+                              {insight.type === 'subscription' ? <RefreshCcw size={18} /> :
+                               insight.type === 'category' ? <PieChart size={18} /> :
+                               <TrendingDown size={18} />}
+                            </div>
+                            <h4 className="font-bold text-white group-hover:text-green-400 transition-colors">{insight.title}</h4>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-bold text-green-400">+{formatCurrency(insight.potentialSaving)}</p>
+                            <p className="text-[10px] text-gray-500">potential / mo</p>
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-400 leading-relaxed">
+                          {insight.description}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-6 bg-[#252525] border-t border-gray-800 flex items-center justify-between">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-sm text-gray-400">Total Monthly Potential:</span>
+                  <span className="text-2xl font-bold text-green-400">
+                    {formatCurrency(totalPotentialSavings)}
+                  </span>
+                </div>
+                <button 
+                  onClick={() => setShowSavingsModal(false)}
+                  className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm font-medium shadow-lg shadow-green-500/20"
+                >
+                  Got it
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Modal */}
       {modal.show && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
@@ -1257,7 +1448,7 @@ export default function App() {
         </header>
 
         {/* Summary Cards */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <div 
             className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2 cursor-pointer hover:border-indigo-500/50 transition-colors group"
             onClick={() => setShowBreakdown(true)}
@@ -1294,6 +1485,17 @@ export default function App() {
               {formatCurrency(stats.net)}
             </p>
             <p className="text-[10px] text-gray-500">Income - Living Expenses</p>
+          </div>
+          <div 
+            className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2 cursor-pointer hover:border-green-500/50 transition-colors group"
+            onClick={() => setShowSavingsModal(true)}
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-gray-400 text-sm font-medium group-hover:text-green-300 transition-colors">Savings Potential</span>
+              <TrendingUp className="text-green-400" size={20} />
+            </div>
+            <p className="text-2xl font-bold text-green-400">{formatCurrency(totalPotentialSavings)}</p>
+            <p className="text-[10px] text-gray-500">Estimated monthly savings identified</p>
           </div>
         </section>
 
