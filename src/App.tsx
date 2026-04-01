@@ -275,118 +275,185 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     return d > latest ? d : latest;
   }, parseDate(transactions[0].date));
 
-  const RETAIL_PROCESSORS = ['dojo', 'iz *', 'zettle', 'sumup', 'square', 'stripe', 'paypal', 'apple pay', 'google pay'];
+  // Processors that are strictly retail (unlikely to be subscriptions)
+  const RETAIL_PROCESSORS = ['dojo', 'iz *', 'zettle', 'sumup', 'square', 'apple pay', 'google pay'];
+  // Processors that are common for both retail AND subscriptions
+  const HYBRID_PROCESSORS = ['stripe', 'paypal', 'amzn mktp', 'amazon.co.uk', 'google play'];
 
   transactions.forEach(t => {
     if (t.amount >= 0) return; // Only spending
     if (t.category === 'Transfer') return; // Skip transfers
     
-    // Normalize description: lowercase, remove numbers and special chars
-    const normalizedDesc = t.description
-      .toLowerCase()
-      .replace(/[0-9]/g, '')
-      .replace(/[*#]/g, ' ') // Replace * with space to separate processor from merchant
-      .replace(/\s+/g, ' ')
-      .trim();
+    // Normalize description: 
+    const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const refWords = ['ref', 'reference', 'payment', 'on', 'at', 'from', 'to', 'limited', 'ltd', 'co', 'uk'];
+    
+    let normalizedDesc = t.description.toLowerCase();
+    
+    // Remove numbers and special chars
+    normalizedDesc = normalizedDesc.replace(/[0-9]/g, '').replace(/[*#]/g, ' ');
+    
+    // Split and filter out noise
+    const words = normalizedDesc.split(/\s+/);
+    const filteredWords = words.filter(w => 
+      w.length > 1 && 
+      !months.includes(w) && 
+      !refWords.includes(w)
+    );
+    
+    normalizedDesc = filteredWords.join(' ').trim();
       
+    if (!normalizedDesc) return;
     if (!groups[normalizedDesc]) groups[normalizedDesc] = [];
     groups[normalizedDesc].push(t);
   });
+
+  // Merge similar groups (e.g. "Google Play YouTube" and "YouTube")
+  const groupKeys = Object.keys(groups);
+  const mergedGroups: Transaction[][] = [];
+  const processedKeys = new Set<string>();
+
+  for (let i = 0; i < groupKeys.length; i++) {
+    if (processedKeys.has(groupKeys[i])) continue;
+    
+    let currentCluster = [...groups[groupKeys[i]]];
+    processedKeys.add(groupKeys[i]);
+
+    for (let j = i + 1; j < groupKeys.length; j++) {
+      if (processedKeys.has(groupKeys[j])) continue;
+      
+      const words1 = groupKeys[i].split(' ');
+      const words2 = groupKeys[j].split(' ');
+      const common = words1.filter(w => words2.includes(w));
+      
+      // Merge if they share a significant word (not a processor, not too short)
+      const significantCommon = common.filter(w => 
+        w.length > 3 && 
+        !RETAIL_PROCESSORS.includes(w) && 
+        !HYBRID_PROCESSORS.includes(w)
+      );
+      
+      if (significantCommon.length > 0) {
+        currentCluster.push(...groups[groupKeys[j]]);
+        processedKeys.add(groupKeys[j]);
+      }
+    }
+    mergedGroups.push(currentCluster);
+  }
   
   const subs: Subscription[] = [];
   
-  Object.entries(groups).forEach(([desc, txs]) => {
-    if (txs.length < 2) return;
-    
-    // Sort by date
-    const sortedTxs = [...txs].sort((a, b) => {
-      const dateA = parseDate(a.date).getTime();
-      const dateB = parseDate(b.date).getTime();
-      return dateA - dateB;
+  mergedGroups.forEach(allTxs => {
+    // Cluster by amount (15% tolerance) to handle multiple plans under one merchant (e.g. Smarty)
+    const amountClusters: Transaction[][] = [];
+    allTxs.forEach(t => {
+      let found = false;
+      for (const cluster of amountClusters) {
+        const avg = cluster.reduce((sum, c) => sum + c.amount, 0) / cluster.length;
+        if (Math.abs(t.amount - avg) <= Math.abs(avg * 0.15)) {
+          cluster.push(t);
+          found = true;
+          break;
+        }
+      }
+      if (!found) amountClusters.push([t]);
     });
 
-    // Calculate intervals (days between)
-    const intervals: number[] = [];
-    for (let i = 1; i < sortedTxs.length; i++) {
-      const d1 = parseDate(sortedTxs[i-1].date);
-      const d2 = parseDate(sortedTxs[i].date);
-      const diffDays = Math.round((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
-      intervals.push(diffDays);
-    }
-
-    // Check if amounts are within 15% tolerance
-    const avgAmount = txs.reduce((sum, t) => sum + t.amount, 0) / txs.length;
-    const isAmountConsistent = txs.every(t => Math.abs(t.amount - avgAmount) <= Math.abs(avgAmount * 0.15));
-
-    if (!isAmountConsistent) return;
-
-    // Detect frequency based on intervals
-    let frequency = '';
-    let medianInterval = 0;
-    if (intervals.length === 1) {
-      const days = intervals[0];
-      medianInterval = days;
-      // For only 2 transactions, we must be very close to a standard period
-      // AND it shouldn't look like a retail processor
-      const isProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
-      if (!isProcessor) {
-        if (days >= 28 && days <= 31) frequency = 'Monthly';
-        else if (days >= 6 && days <= 8) frequency = 'Weekly';
-        else if (days >= 360 && days <= 370) frequency = 'Yearly';
-      }
-    } else {
-      // Multiple intervals - check median
-      const sortedIntervals = [...intervals].sort((a, b) => a - b);
-      medianInterval = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+    amountClusters.forEach(txs => {
+      if (txs.length < 2) return;
       
-      if (medianInterval >= 25 && medianInterval <= 35) frequency = 'Monthly';
-      else if (medianInterval >= 6 && medianInterval <= 8) frequency = 'Weekly';
-      else if (medianInterval >= 350 && medianInterval <= 380) frequency = 'Yearly';
-      
-      // Check if intervals are strictly consistent (at least 80% of intervals are close to median)
-      const closeToMedianCount = intervals.filter(d => Math.abs(d - medianInterval) <= 3).length;
-      if (closeToMedianCount / intervals.length < 0.8) {
-         frequency = ''; 
-      }
-    }
-
-    // Recency check: If the last transaction was too long ago, it's likely cancelled
-    const lastTxDate = parseDate(sortedTxs[sortedTxs.length - 1].date);
-    const daysSinceLastTx = Math.round((latestDataDate.getTime() - lastTxDate.getTime()) / (1000 * 60 * 60 * 24));
-    
-    // Threshold: 1.5x the expected frequency (e.g. 45 days for monthly)
-    let threshold = 45;
-    if (frequency === 'Weekly') threshold = 14;
-    if (frequency === 'Yearly') threshold = 400;
-    if (frequency === 'Monthly') threshold = 45;
-
-    if (daysSinceLastTx > threshold) {
-      frequency = ''; // Mark as inactive/cancelled
-    }
-
-    // Final check: if it's a common shopping merchant but intervals are not strictly monthly, skip
-    const isShopping = ['amazon', 'tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'ebay', 'uber', 'bolt'].some(m => desc.includes(m));
-    if (isShopping && frequency === 'Monthly' && intervals.some(d => d < 25)) {
-      frequency = '';
-    }
-
-    // Exclude retail processors if they only have a few transactions and aren't perfectly periodic
-    const isProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
-    if (isProcessor && txs.length < 4 && frequency) {
-        // Require more evidence for processors
-        frequency = '';
-    }
-
-    if (frequency) {
-      subs.push({
-        merchant: txs[0].description,
-        frequency,
-        avgAmount: Math.abs(avgAmount),
-        annualCost: Math.abs(avgAmount) * (frequency === 'Monthly' ? 12 : frequency === 'Weekly' ? 52 : 1),
-        count: txs.length,
-        lastDate: sortedTxs[sortedTxs.length - 1].date
+      // Sort by date
+      const sortedTxs = [...txs].sort((a, b) => {
+        const dateA = parseDate(a.date).getTime();
+        const dateB = parseDate(b.date).getTime();
+        return dateA - dateB;
       });
-    }
+
+      // Calculate intervals (days between)
+      const intervals: number[] = [];
+      for (let i = 1; i < sortedTxs.length; i++) {
+        const d1 = parseDate(sortedTxs[i-1].date);
+        const d2 = parseDate(sortedTxs[i].date);
+        const diffDays = Math.round((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
+        intervals.push(diffDays);
+      }
+
+      const avgAmount = txs.reduce((sum, t) => sum + t.amount, 0) / txs.length;
+      
+      // Detect frequency based on intervals
+      let frequency = '';
+      let medianInterval = 0;
+      if (intervals.length === 1) {
+        const days = intervals[0];
+        medianInterval = days;
+        
+        // For only 2 transactions, we allow a slightly wider range for monthly
+        // but we are stricter with retail processors
+        const desc = sortedTxs[0].description.toLowerCase();
+        const isRetailProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
+        if (!isRetailProcessor) {
+          if (days >= 25 && days <= 35) frequency = 'Monthly';
+          else if (days >= 6 && days <= 8) frequency = 'Weekly';
+          else if (days >= 350 && days <= 380) frequency = 'Yearly';
+        }
+      } else {
+        // Multiple intervals - check median
+        const sortedIntervals = [...intervals].sort((a, b) => a - b);
+        medianInterval = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+        
+        if (medianInterval >= 25 && medianInterval <= 35) frequency = 'Monthly';
+        else if (medianInterval >= 6 && medianInterval <= 8) frequency = 'Weekly';
+        else if (medianInterval >= 350 && medianInterval <= 380) frequency = 'Yearly';
+        
+        // Check if intervals are consistent (at least 70% of intervals are close to median)
+        const closeToMedianCount = intervals.filter(d => Math.abs(d - medianInterval) <= 5).length;
+        if (closeToMedianCount / intervals.length < 0.7) {
+           frequency = ''; 
+        }
+      }
+
+      // Recency check: If the last transaction was too long ago, it's likely cancelled
+      if (frequency) {
+        const lastTxDate = parseDate(sortedTxs[sortedTxs.length - 1].date);
+        const daysSinceLastTx = Math.round((latestDataDate.getTime() - lastTxDate.getTime()) / (1000 * 60 * 60 * 24));
+        
+        let threshold = 45;
+        if (frequency === 'Weekly') threshold = 14;
+        if (frequency === 'Yearly') threshold = 400;
+
+        if (daysSinceLastTx > threshold) {
+          frequency = ''; // Mark as inactive/cancelled
+        }
+      }
+
+      // Final checks
+      if (frequency) {
+        const desc = sortedTxs[0].description.toLowerCase();
+        
+        // If it's a common shopping merchant but intervals are not strictly monthly, skip
+        const isShopping = ['amazon', 'tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'ebay', 'uber', 'bolt'].some(m => desc.includes(m));
+        if (isShopping && frequency === 'Monthly' && intervals.some(d => d < 25)) {
+          frequency = '';
+        }
+
+        // Exclude retail processors if they only have a few transactions and aren't perfectly periodic
+        const isRetailProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
+        if (isRetailProcessor && txs.length < 4) {
+            frequency = '';
+        }
+      }
+
+      if (frequency) {
+        subs.push({
+          merchant: sortedTxs[0].description,
+          frequency,
+          avgAmount: Math.abs(avgAmount),
+          annualCost: Math.abs(avgAmount) * (frequency === 'Monthly' ? 12 : frequency === 'Weekly' ? 52 : 1),
+          count: txs.length,
+          lastDate: sortedTxs[sortedTxs.length - 1].date
+        });
+      }
+    });
   });
   
   return subs.sort((a, b) => b.annualCost - a.annualCost);
