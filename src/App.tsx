@@ -34,8 +34,10 @@ import {
   ChevronDown,
   Filter,
   CloudOff,
-  Info
+  Info,
+  X
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -357,6 +359,7 @@ export default function App() {
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
   const [uploadLogs, setUploadLogs] = useState<UploadLog[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [showBreakdown, setShowBreakdown] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedBankFilter, setSelectedBankFilter] = useState<string>('all');
@@ -712,6 +715,29 @@ export default function App() {
     };
   }, [filteredTransactions]);
 
+  const categoryBreakdown = useMemo(() => {
+    // Only include spending categories (exclude Income, Transfer, Savings & Investments)
+    const nonTransferTransactions = filteredTransactions.filter(t => t.category !== 'Transfer');
+    const expenses = nonTransferTransactions.filter(t => t.category !== 'Income' && t.category !== 'Savings & Investments');
+    
+    const breakdown: Record<string, number> = {};
+    expenses.forEach(t => {
+      // Amount is negative for spending, positive for refunds
+      breakdown[t.category] = (breakdown[t.category] || 0) + t.amount;
+    });
+
+    const monthsInData = stats.monthsCount || 1;
+
+    return Object.entries(breakdown)
+      .map(([category, total]) => ({
+        category,
+        total: Math.abs(total),
+        average: Math.abs(total) / monthsInData
+      }))
+      .filter(item => item.total > 0)
+      .sort((a, b) => b.average - a.average);
+  }, [filteredTransactions, stats.monthsCount]);
+
   const categoryChartData = useMemo(() => {
     // Use filtered transactions for chart to respect month filter
     const spending = filteredTransactions.filter(t => t.amount < 0 && t.category !== 'Transfer');
@@ -856,6 +882,76 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#121212] text-white font-sans p-4 md:p-8">
+      {/* Breakdown Modal */}
+      <AnimatePresence>
+        {showBreakdown && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowBreakdown(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-[#1e1e1e] border border-gray-800 rounded-2xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-gray-800 flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold text-white">Monthly Breakdown</h3>
+                  <p className="text-xs text-gray-500 mt-1">Avg. expenses by category ({stats.monthsCount} months)</p>
+                </div>
+                <button 
+                  onClick={() => setShowBreakdown(false)}
+                  className="p-2 hover:bg-gray-800 rounded-lg transition-colors text-gray-400 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              
+              <div className="p-6 max-h-[60vh] overflow-y-auto custom-scrollbar">
+                <div className="space-y-6">
+                  {categoryBreakdown.map((item) => (
+                    <div key={item.category} className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium text-gray-300">{item.category}</span>
+                        <span className="font-bold text-white">{formatCurrency(item.average)}</span>
+                      </div>
+                      <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          animate={{ width: `${(item.average / stats.spent) * 100}%` }}
+                          transition={{ duration: 0.8, ease: "easeOut" }}
+                          className="h-full bg-indigo-500"
+                        />
+                      </div>
+                      <div className="flex justify-between text-[10px] text-gray-500">
+                        <span>{((item.average / stats.spent) * 100).toFixed(1)}% of total</span>
+                        <span>Total: {formatCurrency(item.total)}</span>
+                      </div>
+                    </div>
+                  ))}
+                  
+                  {categoryBreakdown.length === 0 && (
+                    <div className="text-center py-8">
+                      <p className="text-gray-500">No spending data found for this period.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+              
+              <div className="p-6 bg-[#252525] border-t border-gray-800 flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-400">Total Avg. Monthly</span>
+                <span className="text-lg font-bold text-red-400">{formatCurrency(stats.spent)}</span>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Modal */}
       {modal.show && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
@@ -946,9 +1042,12 @@ export default function App() {
 
         {/* Summary Cards */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2">
+          <div 
+            className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2 cursor-pointer hover:border-indigo-500/50 transition-colors group"
+            onClick={() => setShowBreakdown(true)}
+          >
             <div className="flex items-center justify-between">
-              <span className="text-gray-400 text-sm font-medium">Monthly Spending</span>
+              <span className="text-gray-400 text-sm font-medium group-hover:text-indigo-300 transition-colors">Monthly Spending</span>
               <TrendingDown className="text-red-400" size={20} />
             </div>
             <p className="text-2xl font-bold text-red-400">{formatCurrency(stats.spent)}</p>
