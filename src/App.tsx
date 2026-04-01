@@ -86,7 +86,7 @@ interface Subscription {
 
 // --- Constants ---
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  'Income': ['salary', 'wage', 'payroll', 'employer', 'dividend', 'interest', 'refund', 'cashback', 'inkorp', 'global shares', 'understan re ltd', 'pay'],
+  'Income': ['salary', 'wage', 'payroll', 'employer', 'dividend', 'interest', 'inkorp', 'global shares', 'understan re ltd', 'pay'],
   'Savings & Investments': ['trading 212', 't212', 'vanguard', 'isa', 'investment', 'savings', 'pension', 'crypto', 'coinbase', 'binance'],
   'Transfer': ['direct debit', 'payment received', 'amex', 'american express', 'barclaycard', 'credit card', 'transfer', 'pot', 'space', 'to starling', 'from starling'],
   'Groceries': ['tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'co-op', 'coop', '7 11', 'waitrose', 'marks & spencer', 'm&s'],
@@ -123,7 +123,7 @@ function generateFingerprint(t: Omit<Transaction, 'id'>, index: number = 0): str
 function autoCategorize(description: string, amount: number, bankCategory: string = 'Uncategorized'): string {
   const desc = description.toLowerCase();
   
-  // Special handling for Trading 212 as requested
+  // Special handling for Trading 212 as requested (for spending/deposits)
   if (desc.includes('trading 212') || desc.includes('t212')) {
     return 'Savings & Investments';
   }
@@ -131,17 +131,24 @@ function autoCategorize(description: string, amount: number, bankCategory: strin
   // If it's a positive amount (credit)
   if (amount > 0) {
     // Check for specific income sources first (high confidence)
-    const highConfidenceIncome = ['wetherspoon', 'j d wetherspoon', 'inkorp', 'global shares', 'understan re ltd'];
+    const highConfidenceIncome = ['wetherspoon', 'j d wetherspoon', 'inkorp', 'global shares', 'understan re ltd', 'trading 212', 't212'];
     if (highConfidenceIncome.some(kw => desc.includes(kw))) {
       return 'Income';
     }
 
-    // Check for standard income keywords
-    // We check for 'pay' specifically as a word to avoid matching 'payment' in transfers
+    // Check if it's a refund for a spending category
+    // This is high priority to ensure refunds offset the correct spending category
+    for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+      if (category === 'Income' || category === 'Transfer' || category === 'Savings & Investments') continue;
+      if (keywords.some(kw => desc.includes(kw.toLowerCase()))) {
+        return category; // It's a refund in a spending category
+      }
+    }
+
+    // Check for standard income keywords (salary, etc.)
     const incomeKeywords = CATEGORY_KEYWORDS['Income'];
     if (incomeKeywords.some(kw => {
       if (kw === 'pay') {
-        // Match 'pay' as a standalone word or at the start/end of a string
         return desc.split(/\s+/).includes('pay');
       }
       return desc.includes(kw.toLowerCase());
@@ -149,16 +156,19 @@ function autoCategorize(description: string, amount: number, bankCategory: strin
       return 'Income';
     }
 
-    // If it's a positive amount but doesn't match income keywords, 
-    // it's likely a transfer from a friend or a refund.
-    // We check for transfer keywords.
+    // Fallback for generic refunds/credits that didn't match a spending category
+    const genericRefundKeywords = ['refund', 'dispute', 'disputed charge', 'credit adjustment', 'credit', 'cashback'];
+    if (genericRefundKeywords.some(kw => desc.includes(kw))) {
+      return 'Income';
+    }
+
+    // Check for transfer keywords
     const transferKeywords = CATEGORY_KEYWORDS['Transfer'];
     if (transferKeywords.some(kw => desc.includes(kw.toLowerCase()))) {
       return 'Transfer';
     }
 
     // Default for positive amounts that aren't clearly income: Transfer
-    // This prevents friends/family payments from inflating income stats.
     return 'Transfer';
   }
 
@@ -234,12 +244,13 @@ function normalizeDate(dateStr: string, bank: BankType): string {
 }
 
 function normalizeAmount(amountStr: string, bank: BankType): number {
-  let val = parseFloat(amountStr.replace(/,/g, ''));
+  let val = parseFloat(amountStr.replace(/,/g, '').replace(/[£$]/g, ''));
   if (isNaN(val)) return 0;
   
   if (bank === 'Barclaycard' || bank === 'Amex') {
-    // Positive is spend -> convert to negative
-    return -Math.abs(val);
+    // In these formats, charges are typically positive and credits are negative.
+    // We want charges to be negative (spending) and credits to be positive (income/refund).
+    return -val;
   }
   // Starling is already correct
   return val;
@@ -658,9 +669,18 @@ export default function App() {
     // Use filtered transactions for stats (already restricted to 12 months)
     const nonTransferTransactions = filteredTransactions.filter(t => t.category !== 'Transfer');
     
-    const totalSpent = nonTransferTransactions.filter(t => t.amount < 0 && t.category !== 'Savings & Investments').reduce((sum, t) => sum + t.amount, 0);
-    const totalIncome = nonTransferTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + t.amount, 0);
-    const totalSavings = nonTransferTransactions.filter(t => t.category === 'Savings & Investments').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+    const totalExpenses = nonTransferTransactions
+      .filter(t => t.category !== 'Income' && t.category !== 'Savings & Investments')
+      .reduce((sum, t) => sum + t.amount, 0);
+    
+    const totalIncome = nonTransferTransactions
+      .filter(t => t.category === 'Income')
+      .reduce((sum, t) => sum + t.amount, 0);
+    
+    // Net Savings (Money sent to savings minus any withdrawals/dividends returned to bank)
+    const savingsOut = nonTransferTransactions.filter(t => t.category === 'Savings & Investments' && t.amount < 0).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+    const savingsIn = nonTransferTransactions.filter(t => t.category === 'Savings & Investments' && t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+    const totalSavings = savingsOut - savingsIn;
     
     // Count unique months in the filtered data to get accurate averages
     const monthsInData = new Set(filteredTransactions.map(t => {
@@ -671,8 +691,8 @@ export default function App() {
     // Monthly averages
     const monthlyIncome = totalIncome / monthsInData;
     const monthlySavings = totalSavings / monthsInData;
-    const monthlySpent = Math.abs(totalSpent) / monthsInData;
-    const monthlyNet = (totalIncome + totalSpent - totalSavings) / monthsInData;
+    const monthlySpent = Math.abs(totalExpenses) / monthsInData;
+    const monthlyNet = (totalIncome + totalExpenses) / monthsInData;
 
     // Yearly totals (actual sum of filtered transactions in the 12-month window)
     const yearlyIncome = totalIncome;
@@ -932,7 +952,7 @@ export default function App() {
               <TrendingDown className="text-red-400" size={20} />
             </div>
             <p className="text-2xl font-bold text-red-400">{formatCurrency(stats.spent)}</p>
-            <p className="text-[10px] text-gray-500">Avg. monthly spend (excl. transfers)</p>
+            <p className="text-[10px] text-gray-500">Living expenses (excl. savings)</p>
           </div>
           <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
@@ -958,7 +978,7 @@ export default function App() {
             <p className={cn("text-2xl font-bold", stats.net >= 0 ? "text-green-400" : "text-red-400")}>
               {formatCurrency(stats.net)}
             </p>
-            <p className="text-[10px] text-gray-500">Avg. monthly net cash flow</p>
+            <p className="text-[10px] text-gray-500">Income - Living Expenses</p>
           </div>
         </section>
 
