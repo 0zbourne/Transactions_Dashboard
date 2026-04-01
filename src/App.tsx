@@ -161,7 +161,7 @@ function autoCategorize(description: string, amount: number, bankCategory: strin
     // Fallback for generic refunds/credits that didn't match a spending category
     const genericRefundKeywords = ['refund', 'dispute', 'disputed charge', 'credit adjustment', 'credit', 'cashback'];
     if (genericRefundKeywords.some(kw => desc.includes(kw))) {
-      return 'Income';
+      return 'Refunds';
     }
 
     // Check for transfer keywords
@@ -170,8 +170,8 @@ function autoCategorize(description: string, amount: number, bankCategory: strin
       return 'Transfer';
     }
 
-    // Default for positive amounts that aren't clearly income: Transfer
-    return 'Transfer';
+    // Default for positive amounts that aren't clearly income: Refunds
+    return 'Refunds';
   }
 
   // For negative amounts (spending)
