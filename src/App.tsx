@@ -578,6 +578,7 @@ export default function App() {
   const [selectedInsightId, setSelectedInsightId] = useState<string | null>(null);
   const [aiInsights, setAiInsights] = useState<SavingInsight[]>([]);
   const [isAnalyzingAI, setIsAnalyzingAI] = useState(false);
+  const [showTrendByCategory, setShowTrendByCategory] = useState(false);
   const [modal, setModal] = useState<{
     show: boolean;
     title: string;
@@ -954,18 +955,25 @@ export default function App() {
     // Use filtered transactions for chart to respect month filter
     const spending = filteredTransactions.filter(t => t.amount < 0 && t.category !== 'Transfer');
     const catTotals: Record<string, number> = {};
+    let totalSpending = 0;
     spending.forEach(t => {
-      catTotals[t.category] = (catTotals[t.category] || 0) + Math.abs(t.amount);
+      const amt = Math.abs(t.amount);
+      catTotals[t.category] = (catTotals[t.category] || 0) + amt;
+      totalSpending += amt;
     });
 
     const sorted = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
     const top8 = sorted.slice(0, 8);
     const others = sorted.slice(8).reduce((sum, item) => sum + item[1], 0);
 
-    const labels = top8.map(i => i[0]);
+    const labels = top8.map(i => {
+      const percentage = totalSpending > 0 ? ((i[1] / totalSpending) * 100).toFixed(1) : 0;
+      return `${i[0]} (${percentage}%)`;
+    });
     const data = top8.map(i => i[1]);
     if (others > 0) {
-      labels.push('Other');
+      const percentage = totalSpending > 0 ? ((others / totalSpending) * 100).toFixed(1) : 0;
+      labels.push(`Other (${percentage}%)`);
       data.push(others);
     }
 
@@ -983,12 +991,21 @@ export default function App() {
   }, [filteredTransactions]);
 
   const trendChartData = useMemo(() => {
-    const monthTotals: Record<string, number> = {};
+    const monthTotals: Record<string, Record<string, number>> = {};
+    const allCategories = new Set<string>();
+
     allTransactions.forEach(t => {
       if (t.amount >= 0 || t.category === 'Transfer') return;
       const [d, m, y] = t.date.split('/');
       const key = `${y}-${m}`;
-      monthTotals[key] = (monthTotals[key] || 0) + Math.abs(t.amount);
+      if (!monthTotals[key]) monthTotals[key] = {};
+      
+      if (showTrendByCategory) {
+        monthTotals[key][t.category] = (monthTotals[key][t.category] || 0) + Math.abs(t.amount);
+        allCategories.add(t.category);
+      } else {
+        monthTotals[key]['Total'] = (monthTotals[key]['Total'] || 0) + Math.abs(t.amount);
+      }
     });
 
     const sortedKeys = Object.keys(monthTotals).sort();
@@ -997,18 +1014,61 @@ export default function App() {
       const date = new Date(parseInt(y), parseInt(m) - 1);
       return date.toLocaleString('default', { month: 'short', year: '2-digit' });
     });
-    const data = sortedKeys.map(k => monthTotals[k]);
+
+    if (showTrendByCategory) {
+      const catTotalsAcrossMonths: Record<string, number> = {};
+      Array.from(allCategories).forEach(cat => {
+        catTotalsAcrossMonths[cat] = Object.values(monthTotals).reduce((sum, m) => sum + (m[cat] || 0), 0);
+      });
+
+      const sortedCats = Object.entries(catTotalsAcrossMonths)
+        .sort((a, b) => b[1] - a[1]);
+      
+      const topNCats = sortedCats.slice(0, 6).map(c => c[0]);
+      const otherCats = sortedCats.slice(6).map(c => c[0]);
+
+      const colors = [
+        '#f87171', '#fb923c', '#fbbf24', '#a3e635', 
+        '#2dd4bf', '#38bdf8', '#818cf8', '#c084fc', '#94a3b8',
+        '#6366f1', '#ec4899', '#14b8a6', '#f59e0b', '#ef4444'
+      ];
+
+      const datasets = topNCats.map((cat, i) => ({
+        label: cat,
+        data: sortedKeys.map(k => monthTotals[k][cat] || 0),
+        backgroundColor: colors[i % colors.length],
+        borderRadius: 4,
+        stack: 'stack0'
+      }));
+
+      if (otherCats.length > 0) {
+        datasets.push({
+          label: 'Other',
+          data: sortedKeys.map(k => {
+            return otherCats.reduce((sum, cat) => sum + (monthTotals[k][cat] || 0), 0);
+          }),
+          backgroundColor: '#94a3b8',
+          borderRadius: 4,
+          stack: 'stack0'
+        });
+      }
+
+      return {
+        labels,
+        datasets
+      };
+    }
 
     return {
       labels,
       datasets: [{
         label: 'Monthly Spending',
-        data,
+        data: sortedKeys.map(k => monthTotals[k]['Total']),
         backgroundColor: '#6366f1',
         borderRadius: 4,
       }]
     };
-  }, [allTransactions]);
+  }, [allTransactions, showTrendByCategory]);
 
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
@@ -1946,9 +2006,23 @@ export default function App() {
               </div>
             </div>
             <div className="bg-[#1e1e1e] border border-gray-800 p-6 rounded-xl">
-              <div className="flex items-center gap-2 mb-6">
-                <BarChart3 size={18} className="text-indigo-400" />
-                <h2 className="text-lg font-semibold">Monthly Trend</h2>
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-2">
+                  <BarChart3 size={18} className="text-indigo-400" />
+                  <h2 className="text-lg font-semibold">Monthly Trend</h2>
+                </div>
+                <button
+                  onClick={() => setShowTrendByCategory(!showTrendByCategory)}
+                  className={cn(
+                    "flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border",
+                    showTrendByCategory 
+                      ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-400 hover:bg-indigo-600/30" 
+                      : "bg-[#2a2a2a] border-gray-700 text-gray-400 hover:bg-[#333]"
+                  )}
+                >
+                  <Filter size={14} />
+                  <span>{showTrendByCategory ? "Split by Category" : "Total Only"}</span>
+                </button>
               </div>
               <div className="h-[300px]">
                 <Bar 
@@ -1956,10 +2030,24 @@ export default function App() {
                   options={{
                     maintainAspectRatio: false,
                     scales: {
-                      y: { grid: { color: '#2a2a2a' }, ticks: { color: '#9ca3af' } },
-                      x: { grid: { display: false }, ticks: { color: '#9ca3af' } }
+                      y: { 
+                        stacked: showTrendByCategory,
+                        grid: { color: '#2a2a2a' }, 
+                        ticks: { color: '#9ca3af' } 
+                      },
+                      x: { 
+                        stacked: showTrendByCategory,
+                        grid: { display: false }, 
+                        ticks: { color: '#9ca3af' } 
+                      }
                     },
-                    plugins: { legend: { display: false } }
+                    plugins: { 
+                      legend: { 
+                        display: showTrendByCategory,
+                        position: 'bottom',
+                        labels: { color: '#9ca3af', boxWidth: 10, padding: 15, font: { size: 10 } }
+                      } 
+                    }
                   }}
                 />
               </div>
