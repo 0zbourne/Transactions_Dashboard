@@ -84,6 +84,7 @@ interface Subscription {
   avgAmount: number;
   annualCost: number;
   count: number;
+  lastDate: string;
 }
 
 // --- Constants ---
@@ -264,8 +265,16 @@ function parseDate(dateStr: string): Date {
 }
 
 function detectSubscriptions(transactions: Transaction[]): Subscription[] {
+  if (transactions.length === 0) return [];
+  
   const groups: Record<string, Transaction[]> = {};
   
+  // Find the latest transaction date in the entire dataset to use as a reference for "now"
+  const latestDataDate = transactions.reduce((latest, t) => {
+    const d = parseDate(t.date);
+    return d > latest ? d : latest;
+  }, parseDate(transactions[0].date));
+
   const RETAIL_PROCESSORS = ['dojo', 'iz *', 'zettle', 'sumup', 'square', 'stripe', 'paypal', 'apple pay', 'google pay'];
 
   transactions.forEach(t => {
@@ -313,8 +322,10 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
 
     // Detect frequency based on intervals
     let frequency = '';
+    let medianInterval = 0;
     if (intervals.length === 1) {
       const days = intervals[0];
+      medianInterval = days;
       // For only 2 transactions, we must be very close to a standard period
       // AND it shouldn't look like a retail processor
       const isProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
@@ -326,17 +337,31 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     } else {
       // Multiple intervals - check median
       const sortedIntervals = [...intervals].sort((a, b) => a - b);
-      const median = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+      medianInterval = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
       
-      if (median >= 25 && median <= 35) frequency = 'Monthly';
-      else if (median >= 6 && median <= 8) frequency = 'Weekly';
-      else if (median >= 350 && median <= 380) frequency = 'Yearly';
+      if (medianInterval >= 25 && medianInterval <= 35) frequency = 'Monthly';
+      else if (medianInterval >= 6 && medianInterval <= 8) frequency = 'Weekly';
+      else if (medianInterval >= 350 && medianInterval <= 380) frequency = 'Yearly';
       
       // Check if intervals are strictly consistent (at least 80% of intervals are close to median)
-      const closeToMedianCount = intervals.filter(d => Math.abs(d - median) <= 3).length;
+      const closeToMedianCount = intervals.filter(d => Math.abs(d - medianInterval) <= 3).length;
       if (closeToMedianCount / intervals.length < 0.8) {
          frequency = ''; 
       }
+    }
+
+    // Recency check: If the last transaction was too long ago, it's likely cancelled
+    const lastTxDate = parseDate(sortedTxs[sortedTxs.length - 1].date);
+    const daysSinceLastTx = Math.round((latestDataDate.getTime() - lastTxDate.getTime()) / (1000 * 60 * 60 * 24));
+    
+    // Threshold: 1.5x the expected frequency (e.g. 45 days for monthly)
+    let threshold = 45;
+    if (frequency === 'Weekly') threshold = 14;
+    if (frequency === 'Yearly') threshold = 400;
+    if (frequency === 'Monthly') threshold = 45;
+
+    if (daysSinceLastTx > threshold) {
+      frequency = ''; // Mark as inactive/cancelled
     }
 
     // Final check: if it's a common shopping merchant but intervals are not strictly monthly, skip
@@ -358,7 +383,8 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         frequency,
         avgAmount: Math.abs(avgAmount),
         annualCost: Math.abs(avgAmount) * (frequency === 'Monthly' ? 12 : frequency === 'Weekly' ? 52 : 1),
-        count: txs.length
+        count: txs.length,
+        lastDate: sortedTxs[sortedTxs.length - 1].date
       });
     }
   });
@@ -1015,7 +1041,7 @@ export default function App() {
                               {sub.frequency}
                             </span>
                             <span className="text-[10px] text-gray-500">
-                              {sub.count} occurrences
+                              {sub.count} occurrences • Last: {sub.lastDate}
                             </span>
                           </div>
                         </div>
