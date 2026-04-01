@@ -266,6 +266,8 @@ function parseDate(dateStr: string): Date {
 function detectSubscriptions(transactions: Transaction[]): Subscription[] {
   const groups: Record<string, Transaction[]> = {};
   
+  const RETAIL_PROCESSORS = ['dojo', 'iz *', 'zettle', 'sumup', 'square', 'stripe', 'paypal', 'apple pay', 'google pay'];
+
   transactions.forEach(t => {
     if (t.amount >= 0) return; // Only spending
     if (t.category === 'Transfer') return; // Skip transfers
@@ -274,7 +276,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     const normalizedDesc = t.description
       .toLowerCase()
       .replace(/[0-9]/g, '')
-      .replace(/[*#]/g, '')
+      .replace(/[*#]/g, ' ') // Replace * with space to separate processor from merchant
       .replace(/\s+/g, ' ')
       .trim();
       
@@ -314,9 +316,13 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     if (intervals.length === 1) {
       const days = intervals[0];
       // For only 2 transactions, we must be very close to a standard period
-      if (days >= 27 && days <= 33) frequency = 'Monthly';
-      else if (days >= 6 && days <= 8) frequency = 'Weekly';
-      else if (days >= 350 && days <= 380) frequency = 'Yearly';
+      // AND it shouldn't look like a retail processor
+      const isProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
+      if (!isProcessor) {
+        if (days >= 28 && days <= 31) frequency = 'Monthly';
+        else if (days >= 6 && days <= 8) frequency = 'Weekly';
+        else if (days >= 360 && days <= 370) frequency = 'Yearly';
+      }
     } else {
       // Multiple intervals - check median
       const sortedIntervals = [...intervals].sort((a, b) => a - b);
@@ -326,17 +332,24 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
       else if (median >= 6 && median <= 8) frequency = 'Weekly';
       else if (median >= 350 && median <= 380) frequency = 'Yearly';
       
-      // Check if intervals are somewhat consistent (at least 70% of intervals are close to median)
-      const closeToMedianCount = intervals.filter(d => Math.abs(d - median) <= 5).length;
-      if (closeToMedianCount / intervals.length < 0.7) {
+      // Check if intervals are strictly consistent (at least 80% of intervals are close to median)
+      const closeToMedianCount = intervals.filter(d => Math.abs(d - median) <= 3).length;
+      if (closeToMedianCount / intervals.length < 0.8) {
          frequency = ''; 
       }
     }
 
     // Final check: if it's a common shopping merchant but intervals are not strictly monthly, skip
-    const isShopping = ['amazon', 'tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'ebay'].some(m => desc.includes(m));
-    if (isShopping && frequency === 'Monthly' && intervals.some(d => d < 20)) {
+    const isShopping = ['amazon', 'tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'ebay', 'uber', 'bolt'].some(m => desc.includes(m));
+    if (isShopping && frequency === 'Monthly' && intervals.some(d => d < 25)) {
       frequency = '';
+    }
+
+    // Exclude retail processors if they only have a few transactions and aren't perfectly periodic
+    const isProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
+    if (isProcessor && txs.length < 4 && frequency) {
+        // Require more evidence for processors
+        frequency = '';
     }
 
     if (frequency) {
@@ -366,6 +379,7 @@ export default function App() {
   const [hideTransfers, setHideTransfers] = useState(true);
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
   const [showHistory, setShowHistory] = useState(false);
+  const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
   const [modal, setModal] = useState<{
     show: boolean;
     title: string;
@@ -951,6 +965,115 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+      
+      {/* Subscriptions Modal */}
+      <AnimatePresence>
+        {showSubscriptionModal && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowSubscriptionModal(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-4xl bg-[#1e1e1e] border border-gray-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-6 border-b border-gray-800 flex items-center justify-between bg-[#1e1e1e] z-10">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-amber-500/10 rounded-lg">
+                    <RefreshCcw size={24} className="text-amber-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-white">Detected Subscriptions</h3>
+                    <p className="text-xs text-gray-500 mt-1">Recurring payments identified across your statements</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowSubscriptionModal(false)}
+                  className="p-2 hover:bg-gray-800 rounded-lg transition-colors text-gray-400 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                  {subscriptions.map((sub, i) => (
+                    <div key={i} className="bg-[#252525] border border-gray-800 rounded-xl p-5 hover:border-amber-500/30 transition-colors group">
+                      <div className="flex justify-between items-start mb-4">
+                        <div className="space-y-1">
+                          <p className="text-sm font-bold text-white group-hover:text-amber-400 transition-colors truncate max-w-[200px]" title={sub.merchant}>
+                            {sub.merchant}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 rounded border border-gray-700">
+                              {sub.frequency}
+                            </span>
+                            <span className="text-[10px] text-gray-500">
+                              {sub.count} occurrences
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-lg font-bold text-white">{formatCurrency(sub.avgAmount)}</p>
+                          <p className="text-[10px] text-gray-500">per {sub.frequency.toLowerCase().replace('ly', '')}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="pt-4 border-t border-gray-800 flex items-center justify-between">
+                        <span className="text-xs text-gray-400">Estimated Annual Cost</span>
+                        <span className="text-sm font-bold text-amber-400">{formatCurrency(sub.annualCost)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Logic Explanation */}
+                <div className="bg-indigo-500/5 border border-indigo-500/20 rounded-xl p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Info size={18} className="text-indigo-400" />
+                    <h4 className="text-sm font-bold text-indigo-300">How we detect subscriptions</h4>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-xs text-gray-400 leading-relaxed">
+                    <div className="space-y-2">
+                      <p className="font-medium text-gray-300">1. Pattern Recognition</p>
+                      <p>We group transactions by merchant name and look for recurring intervals (Weekly, Monthly, or Yearly).</p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="font-medium text-gray-300">2. Amount Consistency</p>
+                      <p>Payments must have a consistent amount (within 15% tolerance) to be considered a subscription.</p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="font-medium text-gray-300">3. Retail Filtering</p>
+                      <p>We filter out common retail processors (like Dojo or Zettle) unless they show very strict periodic behavior over many months.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="p-6 bg-[#252525] border-t border-gray-800 flex items-center justify-between">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-sm text-gray-400">Total Annual Subscription Spend:</span>
+                  <span className="text-xl font-bold text-amber-400">
+                    {formatCurrency(subscriptions.reduce((sum, s) => sum + s.annualCost, 0))}
+                  </span>
+                </div>
+                <button 
+                  onClick={() => setShowSubscriptionModal(false)}
+                  className="px-6 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors text-sm font-medium"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Modal */}
       {modal.show && (
@@ -1340,9 +1463,17 @@ export default function App() {
                 <RefreshCcw size={18} className="text-amber-400" />
                 <h2 className="text-lg font-semibold">Detected Subscriptions</h2>
               </div>
-              <span className="text-xs bg-amber-900/30 text-amber-400 px-2 py-1 rounded border border-amber-900/50">
-                AI Detected
-              </span>
+              <div className="flex items-center gap-3">
+                <button 
+                  onClick={() => setShowSubscriptionModal(true)}
+                  className="text-xs text-amber-400 hover:text-amber-300 font-medium transition-colors"
+                >
+                  View All ({subscriptions.length})
+                </button>
+                <span className="text-xs bg-amber-900/30 text-amber-400 px-2 py-1 rounded border border-amber-900/50">
+                  AI Detected
+                </span>
+              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-gray-800">
               {subscriptions.slice(0, 4).map((sub, i) => (
