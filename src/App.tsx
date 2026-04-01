@@ -16,6 +16,7 @@ import {
   Title,
 } from 'chart.js';
 import { Doughnut, Bar } from 'react-chartjs-2';
+import { GoogleGenAI, Type } from "@google/genai";
 import { 
   Upload, 
   Plus, 
@@ -35,7 +36,9 @@ import {
   Filter,
   CloudOff,
   Info,
-  X
+  X,
+  Sparkles,
+  ArrowLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -92,8 +95,9 @@ interface SavingInsight {
   title: string;
   description: string;
   potentialSaving: number;
-  type: 'subscription' | 'category' | 'behavior';
+  type: 'subscription' | 'category' | 'behavior' | 'ai';
   severity: 'low' | 'medium' | 'high';
+  transactionIds?: string[];
 }
 
 // --- Constants ---
@@ -481,13 +485,19 @@ function generateSavingInsights(transactions: Transaction[], subscriptions: Subs
   
   if (streamingSubs.length > 2) {
     const totalStreamingCost = streamingSubs.reduce((sum, s) => sum + (s.avgAmount), 0);
+    // Find transactions for these subs
+    const subTxs = transactions.filter(t => 
+      streamingKeywords.some(k => t.description.toLowerCase().includes(k))
+    );
+    
     insights.push({
       id: 'streaming-consolidation',
       title: 'Consolidate Streaming Services',
       description: `You have ${streamingSubs.length} active streaming subscriptions. Consider if you use all of them regularly.`,
       potentialSaving: totalStreamingCost * 0.5, // Suggest saving half
       type: 'subscription',
-      severity: 'medium'
+      severity: 'medium',
+      transactionIds: subTxs.map(t => t.id)
     });
   }
 
@@ -503,7 +513,8 @@ function generateSavingInsights(transactions: Transaction[], subscriptions: Subs
       description: 'Your spending on Eating Out is over 15% of your total expenses. Cooking at home more often could save you a significant amount.',
       potentialSaving: eatingOutSpent * 0.2, // Suggest saving 20%
       type: 'category',
-      severity: 'high'
+      severity: 'high',
+      transactionIds: eatingOutTxs.map(t => t.id)
     });
   }
 
@@ -517,27 +528,32 @@ function generateSavingInsights(transactions: Transaction[], subscriptions: Subs
       description: `You had ${smallTxs.length} transactions under £10 this period. These small purchases add up to £${smallTxsTotal.toFixed(2)}.`,
       potentialSaving: smallTxsTotal * 0.25,
       type: 'behavior',
-      severity: 'medium'
+      severity: 'medium',
+      transactionIds: smallTxs.map(t => t.id)
     });
   }
 
   // 4. Top Category Reduction (excluding Rent/Bills)
-  const categoryTotals: Record<string, number> = {};
+  const categoryTotals: Record<string, { total: number, ids: string[] }> = {};
   transactions.forEach(t => {
     if (t.amount < 0 && !['Rent', 'Bills', 'Transfer', 'Savings & Investments'].includes(t.category)) {
-      categoryTotals[t.category] = (categoryTotals[t.category] || 0) + Math.abs(t.amount);
+      if (!categoryTotals[t.category]) categoryTotals[t.category] = { total: 0, ids: [] };
+      categoryTotals[t.category].total += Math.abs(t.amount);
+      categoryTotals[t.category].ids.push(t.id);
     }
   });
   
-  const topCategory = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0];
-  if (topCategory) {
+  const topCategoryEntry = Object.entries(categoryTotals).sort((a, b) => b[1].total - a[1].total)[0];
+  if (topCategoryEntry) {
+    const [catName, catData] = topCategoryEntry;
     insights.push({
       id: 'top-category-reduction',
-      title: `Optimize ${topCategory[0]}`,
-      description: `${topCategory[0]} is your highest non-essential spending category (£${topCategory[1].toFixed(2)}). A 10% reduction is an easy win.`,
-      potentialSaving: topCategory[1] * 0.1,
+      title: `Optimize ${catName}`,
+      description: `${catName} is your highest non-essential spending category (£${catData.total.toFixed(2)}). A 10% reduction is an easy win.`,
+      potentialSaving: catData.total * 0.1,
       type: 'category',
-      severity: 'low'
+      severity: 'low',
+      transactionIds: catData.ids
     });
   }
 
@@ -559,6 +575,9 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
   const [showSavingsModal, setShowSavingsModal] = useState(false);
+  const [selectedInsightId, setSelectedInsightId] = useState<string | null>(null);
+  const [aiInsights, setAiInsights] = useState<SavingInsight[]>([]);
+  const [isAnalyzingAI, setIsAnalyzingAI] = useState(false);
   const [modal, setModal] = useState<{
     show: boolean;
     title: string;
@@ -994,12 +1013,91 @@ export default function App() {
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
   const savingsInsights = useMemo(() => {
-    return generateSavingInsights(allTransactions, subscriptions);
-  }, [allTransactions, subscriptions]);
+    const baseInsights = generateSavingInsights(allTransactions, subscriptions);
+    return [...baseInsights, ...aiInsights];
+  }, [allTransactions, subscriptions, aiInsights]);
 
   const totalPotentialSavings = useMemo(() => {
     return savingsInsights.reduce((sum, i) => sum + i.potentialSaving, 0);
   }, [savingsInsights]);
+
+  const runAIDeepDive = async () => {
+    if (allTransactions.length === 0) return;
+    setIsAnalyzingAI(true);
+    
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      
+      // Prepare a compact summary of transactions for the AI
+      // We'll send the top 100 transactions by amount to keep it within limits and relevant
+      const txSummary = allTransactions
+        .filter(t => t.amount < 0)
+        .sort((a, b) => a.amount - b.amount)
+        .slice(0, 100)
+        .map(t => ({
+          id: t.id,
+          date: t.date,
+          desc: t.description,
+          amt: Math.abs(t.amount),
+          cat: t.category
+        }));
+
+      const prompt = `Analyze these 100 transactions and identify 3-5 specific, actionable savings insights. 
+      Look for:
+      1. Duplicate or near-duplicate payments.
+      2. Unusually high spending at specific merchants.
+      3. Patterns that look like forgotten subscriptions.
+      4. Potential lifestyle "leaks" (e.g., too many small coffee shop visits).
+      
+      Return the results as a JSON array of objects matching this schema:
+      {
+        "id": "unique-id",
+        "title": "Short catchy title",
+        "description": "Detailed explanation of why this was flagged",
+        "potentialSaving": number (estimated monthly saving),
+        "severity": "low" | "medium" | "high",
+        "transactionIds": ["id1", "id2", ...] (the specific transaction IDs that triggered this)
+      }
+      
+      Transactions: ${JSON.stringify(txSummary)}`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                title: { type: Type.STRING },
+                description: { type: Type.STRING },
+                potentialSaving: { type: Type.NUMBER },
+                severity: { type: Type.STRING, enum: ["low", "medium", "high"] },
+                transactionIds: { type: Type.ARRAY, items: { type: Type.STRING } }
+              },
+              required: ["id", "title", "description", "potentialSaving", "severity", "transactionIds"]
+            }
+          }
+        }
+      });
+
+      const newInsights = JSON.parse(response.text || "[]").map((i: any) => ({
+        ...i,
+        type: 'ai'
+      }));
+      
+      setAiInsights(newInsights);
+      showAlert("AI Deep Dive Complete", `Gemini identified ${newInsights.length} new savings opportunities.`);
+    } catch (error) {
+      console.error("AI Analysis failed:", error);
+      showAlert("AI Analysis Failed", "There was an error connecting to the AI service. Please try again later.");
+    } finally {
+      setIsAnalyzingAI(false);
+    }
+  };
 
   const coverageStats = useMemo(() => {
     const daily: Record<string, Set<string>> = {
@@ -1270,7 +1368,10 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setShowSavingsModal(false)}
+              onClick={() => {
+                setShowSavingsModal(false);
+                setSelectedInsightId(null);
+              }}
               className="absolute inset-0 bg-black/80 backdrop-blur-sm"
             />
             <motion.div
@@ -1281,61 +1382,174 @@ export default function App() {
             >
               <div className="p-6 border-b border-gray-800 flex items-center justify-between bg-gradient-to-r from-green-500/10 to-transparent">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 bg-green-500/20 rounded-lg">
-                    <TrendingUp size={24} className="text-green-400" />
-                  </div>
+                  {selectedInsightId ? (
+                    <button 
+                      onClick={() => setSelectedInsightId(null)}
+                      className="p-2 hover:bg-gray-800 rounded-lg transition-colors text-gray-400"
+                    >
+                      <ArrowLeft size={20} />
+                    </button>
+                  ) : (
+                    <div className="p-2 bg-green-500/20 rounded-lg">
+                      <TrendingUp size={24} className="text-green-400" />
+                    </div>
+                  )}
                   <div>
-                    <h3 className="text-xl font-bold text-white">Savings Potential</h3>
-                    <p className="text-xs text-gray-400 mt-1">Simple ways to optimize your finances</p>
+                    <h3 className="text-xl font-bold text-white">
+                      {selectedInsightId ? "Insight Details" : "Savings Potential"}
+                    </h3>
+                    <p className="text-xs text-gray-400 mt-1">
+                      {selectedInsightId ? "Reviewing flagged transactions" : "Simple ways to optimize your finances"}
+                    </p>
                   </div>
                 </div>
-                <button 
-                  onClick={() => setShowSavingsModal(false)}
-                  className="p-2 hover:bg-gray-800 rounded-full transition-colors"
-                >
-                  <X size={20} className="text-gray-400" />
-                </button>
+                <div className="flex items-center gap-2">
+                  {!selectedInsightId && (
+                    <button
+                      onClick={runAIDeepDive}
+                      disabled={isAnalyzingAI || allTransactions.length === 0}
+                      className={cn(
+                        "flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                        isAnalyzingAI 
+                          ? "bg-indigo-500/20 text-indigo-400 animate-pulse cursor-not-allowed" 
+                          : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-500/20"
+                      )}
+                    >
+                      {isAnalyzingAI ? (
+                        <>
+                          <RefreshCcw size={14} className="animate-spin" />
+                          AI Analyzing...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles size={14} />
+                          AI Deep Dive
+                        </>
+                      )}
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => {
+                      setShowSavingsModal(false);
+                      setSelectedInsightId(null);
+                    }}
+                    className="p-2 hover:bg-gray-800 rounded-full transition-colors"
+                  >
+                    <X size={20} className="text-gray-400" />
+                  </button>
+                </div>
               </div>
 
-              <div className="p-6 max-h-[60vh] overflow-y-auto space-y-4">
-                {savingsInsights.length === 0 ? (
-                  <div className="text-center py-12">
-                    <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-800 mb-4">
-                      <RefreshCcw size={32} className="text-gray-600" />
-                    </div>
-                    <p className="text-gray-400">No specific savings identified yet. Keep uploading statements!</p>
+              <div className="p-6 max-h-[60vh] overflow-y-auto">
+                {selectedInsightId ? (
+                  <div className="space-y-6">
+                    {(() => {
+                      const insight = savingsInsights.find(i => i.id === selectedInsightId);
+                      if (!insight) return null;
+                      const relatedTxs = allTransactions.filter(t => insight.transactionIds?.includes(t.id));
+                      
+                      return (
+                        <>
+                          <div className="bg-[#252525] border border-gray-800 rounded-xl p-5">
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className={cn(
+                                "p-2 rounded-lg",
+                                insight.severity === 'high' ? "bg-red-500/10 text-red-400" :
+                                insight.severity === 'medium' ? "bg-amber-500/10 text-amber-400" :
+                                "bg-indigo-500/10 text-indigo-400"
+                              )}>
+                                {insight.type === 'subscription' ? <RefreshCcw size={18} /> :
+                                 insight.type === 'category' ? <PieChart size={18} /> :
+                                 insight.type === 'ai' ? <Sparkles size={18} /> :
+                                 <TrendingDown size={18} />}
+                              </div>
+                              <h4 className="font-bold text-white text-lg">{insight.title}</h4>
+                            </div>
+                            <p className="text-sm text-gray-400 leading-relaxed mb-4">
+                              {insight.description}
+                            </p>
+                            <div className="flex items-center justify-between pt-4 border-t border-gray-800">
+                              <span className="text-xs text-gray-500">Estimated Monthly Saving</span>
+                              <span className="text-lg font-bold text-green-400">{formatCurrency(insight.potentialSaving)}</span>
+                            </div>
+                          </div>
+
+                          <div className="space-y-3">
+                            <h5 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Flagged Transactions ({relatedTxs.length})</h5>
+                            <div className="space-y-2">
+                              {relatedTxs.sort((a, b) => parseDate(b.date).getTime() - parseDate(a.date).getTime()).map(tx => (
+                                <div key={tx.id} className="bg-[#1a1a1a] border border-gray-800/50 rounded-lg p-3 flex items-center justify-between">
+                                  <div>
+                                    <p className="text-sm font-medium text-white truncate max-w-[200px]">{tx.description}</p>
+                                    <p className="text-[10px] text-gray-500">{tx.date} • {tx.category}</p>
+                                  </div>
+                                  <p className="text-sm font-bold text-white">{formatCurrency(Math.abs(tx.amount))}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 gap-4">
-                    {savingsInsights.map((insight) => (
-                      <div 
-                        key={insight.id}
-                        className="bg-[#252525] border border-gray-800 rounded-xl p-5 hover:border-green-500/30 transition-all group"
-                      >
-                        <div className="flex items-start justify-between mb-3">
-                          <div className="flex items-center gap-3">
-                            <div className={cn(
-                              "p-2 rounded-lg",
-                              insight.severity === 'high' ? "bg-red-500/10 text-red-400" :
-                              insight.severity === 'medium' ? "bg-amber-500/10 text-amber-400" :
-                              "bg-indigo-500/10 text-indigo-400"
-                            )}>
-                              {insight.type === 'subscription' ? <RefreshCcw size={18} /> :
-                               insight.type === 'category' ? <PieChart size={18} /> :
-                               <TrendingDown size={18} />}
-                            </div>
-                            <h4 className="font-bold text-white group-hover:text-green-400 transition-colors">{insight.title}</h4>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm font-bold text-green-400">+{formatCurrency(insight.potentialSaving)}</p>
-                            <p className="text-[10px] text-gray-500">potential / mo</p>
-                          </div>
+                  <div className="space-y-4">
+                    {savingsInsights.length === 0 ? (
+                      <div className="text-center py-12">
+                        <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-800 mb-4">
+                          <RefreshCcw size={32} className="text-gray-600" />
                         </div>
-                        <p className="text-sm text-gray-400 leading-relaxed">
-                          {insight.description}
-                        </p>
+                        <p className="text-gray-400">No specific savings identified yet. Try running an AI Deep Dive!</p>
                       </div>
-                    ))}
+                    ) : (
+                      <div className="grid grid-cols-1 gap-4">
+                        {savingsInsights.map((insight) => (
+                          <div 
+                            key={insight.id}
+                            onClick={() => setSelectedInsightId(insight.id)}
+                            className="bg-[#252525] border border-gray-800 rounded-xl p-5 hover:border-green-500/30 transition-all group cursor-pointer relative overflow-hidden"
+                          >
+                            {insight.type === 'ai' && (
+                              <div className="absolute top-0 right-0 p-1 bg-indigo-600 text-[8px] font-bold text-white rounded-bl-lg flex items-center gap-1">
+                                <Sparkles size={8} />
+                                AI INSIGHT
+                              </div>
+                            )}
+                            <div className="flex items-start justify-between mb-3">
+                              <div className="flex items-center gap-3">
+                                <div className={cn(
+                                  "p-2 rounded-lg",
+                                  insight.severity === 'high' ? "bg-red-500/10 text-red-400" :
+                                  insight.severity === 'medium' ? "bg-amber-500/10 text-amber-400" :
+                                  "bg-indigo-500/10 text-indigo-400"
+                                )}>
+                                  {insight.type === 'subscription' ? <RefreshCcw size={18} /> :
+                                   insight.type === 'category' ? <PieChart size={18} /> :
+                                   insight.type === 'ai' ? <Sparkles size={18} /> :
+                                   <TrendingDown size={18} />}
+                                </div>
+                                <h4 className="font-bold text-white group-hover:text-green-400 transition-colors">{insight.title}</h4>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-sm font-bold text-green-400">+{formatCurrency(insight.potentialSaving)}</p>
+                                <p className="text-[10px] text-gray-500">potential / mo</p>
+                              </div>
+                            </div>
+                            <p className="text-sm text-gray-400 leading-relaxed mb-3">
+                              {insight.description}
+                            </p>
+                            <div className="flex items-center justify-between pt-3 border-t border-gray-800/50">
+                              <span className="text-[10px] text-gray-500">
+                                {insight.transactionIds?.length || 0} transactions flagged
+                              </span>
+                              <span className="text-[10px] text-indigo-400 font-bold group-hover:translate-x-1 transition-transform">
+                                View Transactions →
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1348,10 +1562,13 @@ export default function App() {
                   </span>
                 </div>
                 <button 
-                  onClick={() => setShowSavingsModal(false)}
+                  onClick={() => {
+                    if (selectedInsightId) setSelectedInsightId(null);
+                    else setShowSavingsModal(false);
+                  }}
                   className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm font-medium shadow-lg shadow-green-500/20"
                 >
-                  Got it
+                  {selectedInsightId ? "Back to List" : "Got it"}
                 </button>
               </div>
             </motion.div>
