@@ -307,7 +307,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     
     // Normalize description: 
     const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-    const refWords = ['ref', 'reference', 'payment', 'on', 'at', 'from', 'to', 'limited', 'ltd', 'co', 'uk'];
+    const refWords = ['ref', 'reference', 'payment', 'on', 'at', 'from', 'to', 'limited', 'ltd', 'co', 'uk', 'marketplace', 'mktplace', 'mktp', 'amazon', 'amzn'];
     
     let normalizedDesc = t.description.toLowerCase();
     
@@ -352,6 +352,14 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     
     normalizedDesc = [...new Set(filteredWords)].join(' ').trim();
       
+    // If we've stripped everything but there's still a transaction, 
+    // it means it was all "noise". In this case, use a simplified version of the original.
+    if (!normalizedDesc) {
+      normalizedDesc = wordsRaw.filter(w => w.length > 2).join(' ')
+        .replace(/[0-9]/g, '').replace(/[*#]/g, ' ').trim()
+        .split(/\s+/)[0]; // Just take the first meaningful word
+    }
+
     if (!normalizedDesc) return;
     if (!groups[normalizedDesc]) groups[normalizedDesc] = [];
     groups[normalizedDesc].push(t);
@@ -494,9 +502,12 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         
         // Check if intervals are consistent (at least 70% of intervals are close to median)
         // For Bi-Monthly/Quarterly we are slightly more lenient (allow 10 days drift)
+        // We only enforce strict consistency if we have 4+ intervals (5+ transactions)
+        // For fewer intervals, we only require 50% consistency (handles one skip)
         const drift = (frequency === 'Bi-Monthly' || frequency === 'Quarterly') ? 10 : 5;
         const closeToMedianCount = intervals.filter(d => Math.abs(d - medianInterval) <= drift).length;
-        if (closeToMedianCount / intervals.length < 0.7) {
+        const requiredRatio = intervals.length >= 4 ? 0.7 : 0.5;
+        if (closeToMedianCount / intervals.length < requiredRatio) {
            frequency = ''; 
         }
       }
@@ -525,6 +536,8 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         let threshold = 45;
         if (frequency === 'Monthly') threshold = 55; // More breathing room for monthly
         if (frequency === 'Weekly') threshold = 14;
+        if (frequency === 'Bi-Monthly') threshold = 80;
+        if (frequency === 'Quarterly') threshold = 110;
         if (frequency === 'Yearly') threshold = 400;
         if (frequency === 'Irregular') threshold = 90; // Higher threshold for irregular repeats
 
@@ -1633,7 +1646,11 @@ export default function App() {
                             {formatCurrency(sub.avgAmount)}
                           </p>
                           <p className="text-[10px] text-gray-500">
-                            {sub.frequency === 'Yearly' ? 'per year' : sub.frequency === 'Weekly' ? 'per week' : 'per month'}
+                            {sub.frequency === 'Yearly' ? 'per year' : 
+                             sub.frequency === 'Weekly' ? 'per week' : 
+                             sub.frequency === 'Bi-Monthly' ? 'every 2 months' : 
+                             sub.frequency === 'Quarterly' ? 'every 3 months' : 
+                             sub.frequency === 'Irregular' ? 'avg. per month' : 'per month'}
                           </p>
                         </div>
                       </div>
