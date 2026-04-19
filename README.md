@@ -1,6 +1,3 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-
 # Transactions Dashboard
 
 **A unified, intelligent dashboard for managing your bank transactions.**
@@ -59,7 +56,3 @@ Follow these steps to run the dashboard locally:
 - **Data Parsing:** PapaParse for handling dirty CSV extracts natively.
 - **AI Integration:** Google GenAI SDK for generating smart financial recommendations.
 - **Build Tool:** Vite
-
-## Note on Screenshots
-
-*(I attempted to automatically capture a video walkthrough of the UI running locally for you, but encountered a rate-limiting quota error on my browser tool. Once the quota resets, you can simply run the app locally to capture the UI screenshots and embed them here!)*
