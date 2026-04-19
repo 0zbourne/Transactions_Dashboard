@@ -393,7 +393,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         ];
         
         const isFixed = txs[0].category === 'Bills' || txs[0].category === 'Rent' ||
-                        ['rent', 'mortgage', 'council', 'water', 'electric', 'gas', 'insurance', 'tax', 'premium'].some(k => desc.includes(k));
+                        ['rent', 'mortgage', 'council', 'water', 'electric', 'gas', 'insurance', 'tax'].some(k => desc.includes(k));
 
         const isPotentialYearly = yearlyKeywords.some(k => desc.includes(k)) || 
                                  txs[0].category === 'Subscriptions' ||
@@ -508,7 +508,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
       if (frequency) {
         const desc = sortedTxs[0].description.toLowerCase();
         const isFixed = sortedTxs[0].category === 'Bills' || sortedTxs[0].category === 'Rent' ||
-                        ['rent', 'mortgage', 'council', 'water', 'electric', 'gas', 'insurance', 'tax', 'premium'].some(k => desc.includes(k));
+                        ['rent', 'mortgage', 'council', 'water', 'electric', 'gas', 'insurance', 'tax'].some(k => desc.includes(k));
 
         let annualCost = 0;
         if (frequency === 'Monthly') annualCost = Math.abs(avgAmount) * 12;

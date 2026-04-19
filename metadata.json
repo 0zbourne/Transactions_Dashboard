@@ -1,5 +1,6 @@
 {
-  "name": "1-Year Trailing Transactions Dashboard",
+  "name": "Transactions Dashboard",
   "description": "A local-first dashboard for analyzing the last 12 months of bank transactions from Barclaycard, Amex, and Starling.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": []
 }
