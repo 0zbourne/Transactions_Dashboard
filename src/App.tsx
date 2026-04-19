@@ -311,7 +311,21 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     
     let normalizedDesc = t.description.toLowerCase();
     
-    // Remove numbers and special chars
+    // Specifically strip common alphanumeric transaction IDs (often have mix of 5+ letters and numbers)
+    // and Amazon/Google specific prefixes
+    
+    // First, strip anything that looks like a unique transaction ID code 
+    // (words with both letters and numbers, length 6+)
+    const wordsRaw = normalizedDesc.split(/\s+/);
+    const cleanedWordsRaw = wordsRaw.map(w => {
+      const hasNumber = /\d/.test(w);
+      const hasLetter = /[a-z]/i.test(w);
+      if (hasNumber && hasLetter && w.length >= 6) return '';
+      return w;
+    });
+    normalizedDesc = cleanedWordsRaw.join(' ').trim();
+
+    // Remove numbers and remaining special chars
     normalizedDesc = normalizedDesc.replace(/[0-9]/g, '').replace(/[*#]/g, ' ');
     
     // Specifically strip major ecosystem names and processors
@@ -463,6 +477,8 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         if (!isRetailProcessor) {
           if (days >= 25 && days <= 35) frequency = 'Monthly';
           else if (days >= 6 && days <= 8) frequency = 'Weekly';
+          else if (days >= 50 && days <= 65) frequency = 'Bi-Monthly';
+          else if (days >= 85 && days <= 95) frequency = 'Quarterly';
           else if (days >= 350 && days <= 380) frequency = 'Yearly';
         }
       } else {
@@ -472,20 +488,32 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         
         if (medianInterval >= 25 && medianInterval <= 35) frequency = 'Monthly';
         else if (medianInterval >= 6 && medianInterval <= 8) frequency = 'Weekly';
+        else if (medianInterval >= 50 && medianInterval <= 65) frequency = 'Bi-Monthly';
+        else if (medianInterval >= 85 && medianInterval <= 95) frequency = 'Quarterly';
         else if (medianInterval >= 350 && medianInterval <= 380) frequency = 'Yearly';
         
         // Check if intervals are consistent (at least 70% of intervals are close to median)
-        const closeToMedianCount = intervals.filter(d => Math.abs(d - medianInterval) <= 5).length;
+        // For Bi-Monthly/Quarterly we are slightly more lenient (allow 10 days drift)
+        const drift = (frequency === 'Bi-Monthly' || frequency === 'Quarterly') ? 10 : 5;
+        const closeToMedianCount = intervals.filter(d => Math.abs(d - medianInterval) <= drift).length;
         if (closeToMedianCount / intervals.length < 0.7) {
            frequency = ''; 
         }
       }
 
       // Marketplace / Repeat Purchase Logic (Irregular) - Amazon & App Ecosystems
-      if (!frequency && txs.length >= 4) {
+      if (!frequency && txs.length >= 3) {
         const isMarketplace = ['amazon', 'apple.com', 'google'].some(m => desc.includes(m));
         if (isMarketplace) {
-          frequency = 'Irregular';
+          // Check for amount stability (Marketplace subs are often fixed amounts)
+          const amounts = txs.map(t => t.amount);
+          const isStableAmount = amounts.every(a => Math.abs(a - avgAmount) < 0.1);
+          if (isStableAmount) {
+            frequency = 'Irregular';
+          } else if (txs.length >= 4) {
+            // If they aren't stable, still count as irregular if they are very frequent
+            frequency = 'Irregular';
+          }
         }
       }
 
@@ -540,6 +568,8 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         let annualCost = 0;
         if (frequency === 'Monthly') annualCost = Math.abs(avgAmount) * 12;
         else if (frequency === 'Weekly') annualCost = Math.abs(avgAmount) * 52;
+        else if (frequency === 'Bi-Monthly') annualCost = Math.abs(avgAmount) * 6;
+        else if (frequency === 'Quarterly') annualCost = Math.abs(avgAmount) * 4;
         else if (frequency === 'Yearly') annualCost = Math.abs(avgAmount);
         else if (frequency === 'Irregular') {
           // Extrapolate based on the time span of the existing transactions
