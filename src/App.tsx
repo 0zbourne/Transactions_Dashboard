@@ -391,6 +391,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         ];
         
         const isPotentialYearly = yearlyKeywords.some(k => desc.includes(k)) || 
+                                 txs[0].category === 'Subscriptions' ||
                                  (Math.abs(avgAmount) >= 40 && ['Bills', 'Services', 'Shopping', 'Lifestyle', 'General Purchases', 'Transport'].includes(txs[0].category));
 
         if (isPotentialYearly && txs[0].category !== 'Transfer' && txs[0].amount < 0) {
@@ -403,7 +404,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
             count: 1,
             lastDate: txs[0].date,
             isPotential: true,
-            reason: yearlyKeywords.some(k => desc.includes(k)) ? 'Keyword Match' : 'High Value One-off'
+            reason: txs[0].category === 'Subscriptions' ? 'Category Match' : (yearlyKeywords.some(k => desc.includes(k)) ? 'Keyword Match' : 'High Value One-off')
           });
         }
         return;
@@ -1583,8 +1584,8 @@ export default function App() {
                       <p>Payments must have a consistent amount (within 15% tolerance) to be considered a subscription.</p>
                     </div>
                     <div className="space-y-2">
-                      <p className="font-medium text-gray-300">3. Retail Filtering</p>
-                      <p>We filter out common retail processors (like Dojo or Zettle) unless they show very strict periodic behavior over many months.</p>
+                      <p className="font-medium text-gray-300">3. Smart Filtering</p>
+                      <p>We automatically include items in the "Subscriptions" category and scan for high-value services or billing keywords.</p>
                     </div>
                   </div>
                 </div>
