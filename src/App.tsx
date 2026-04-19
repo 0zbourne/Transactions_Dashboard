@@ -466,10 +466,10 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         }
       }
 
-      // Marketplace / Repeat Purchase Logic (Irregular)
-      if (!frequency && txs.length >= 3) {
-        const isMarketplace = ['amazon', 'ebay', 'temu', 'shein', 'apple.com', 'google', 'bolt', 'uber'].some(m => desc.includes(m));
-        if (isMarketplace) {
+      // Marketplace / Repeat Purchase Logic (Irregular) - Restricted to Amazon
+      if (!frequency && txs.length >= 4) {
+        const isAmazon = desc.includes('amazon');
+        if (isAmazon) {
           frequency = 'Irregular';
         }
       }
@@ -482,6 +482,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         let threshold = 45;
         if (frequency === 'Weekly') threshold = 14;
         if (frequency === 'Yearly') threshold = 400;
+        if (frequency === 'Irregular') threshold = 90; // Higher threshold for irregular repeats
 
         if (daysSinceLastTx > threshold) {
           frequency = ''; // Mark as inactive/cancelled
