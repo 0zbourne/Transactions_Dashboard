@@ -300,8 +300,6 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
   const RETAIL_PROCESSORS = ['dojo', 'iz *', 'zettle', 'sumup', 'square'];
   // Processors that are common for both retail AND subscriptions
   const HYBRID_PROCESSORS = ['stripe', 'paypal', 'amzn mktp', 'amazon.co.uk', 'google play', 'google pay', 'apple pay', 'apple.com'];
-  // Significant words that should trigger a merge even if processors differ
-  const HUB_KEYWORDS = ['youtube', 'netflix', 'spotify', 'disney', 'amazon', 'apple', 'google', 'microsoft', 'adobe', 'icloud', 'chatgpt', 'openai'];
 
   transactions.forEach(t => {
     if (t.amount >= 0) return; // Only spending
@@ -316,6 +314,20 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     // Remove numbers and special chars
     normalizedDesc = normalizedDesc.replace(/[0-9]/g, '').replace(/[*#]/g, ' ');
     
+    // Specifically strip major ecosystem names and processors
+    const processorNoise = [
+      'google play', 'google pay', 'google', 'apple pay', 'apple.com', 'apple', 
+      'stripe', 'paypal', 'amzn mktp', 'amazon.co.uk', 'amazon'
+    ];
+    
+    processorNoise.forEach(p => {
+      // Use regex to only strip at word boundaries or if it's the start
+      const regex = new RegExp(`\\b${p.replace('.', '\\.')}\\b`, 'gi');
+      if (normalizedDesc.trim() !== p) {
+        normalizedDesc = normalizedDesc.replace(regex, '').trim();
+      }
+    });
+
     // Split and filter out noise
     const words = normalizedDesc.split(/\s+/);
     const filteredWords = words.filter(w => 
@@ -324,7 +336,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
       !refWords.includes(w)
     );
     
-    normalizedDesc = filteredWords.join(' ').trim();
+    normalizedDesc = [...new Set(filteredWords)].join(' ').trim();
       
     if (!normalizedDesc) return;
     if (!groups[normalizedDesc]) groups[normalizedDesc] = [];
@@ -350,16 +362,13 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
       const common = words1.filter(w => words2.includes(w));
       
       // Merge if they share a significant word (not a processor, not too short)
-      // OR if they share a "Hub" keyword (like YouTube)
-      const hasHubKeywordMatch = HUB_KEYWORDS.some(k => groupKeys[i].includes(k) && groupKeys[j].includes(k));
-      
       const significantCommon = common.filter(w => 
         w.length > 3 && 
         !RETAIL_PROCESSORS.some(rp => rp === w || rp.startsWith(w + ' ')) && 
         !HYBRID_PROCESSORS.some(hp => hp === w || hp.startsWith(w + ' '))
       );
       
-      if (hasHubKeywordMatch || significantCommon.length > 0) {
+      if (significantCommon.length > 0) {
         currentCluster.push(...groups[groupKeys[j]]);
         processedKeys.add(groupKeys[j]);
       }
@@ -394,7 +403,8 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         const yearlyKeywords = [
           'annual', 'yearly', 'membership', 'insurance', 'tax', 'premium', 
           'subscription', 'renew', 'renewal', 'license', 'amazon prime', 
-          'disney plus', 'disney+', 'tv licence', 'council tax', 'car tax'
+          'disney plus', 'disney+', 'tv licence', 'council tax', 'car tax',
+          'porkbun', 'domain', 'hosting', 'registrar'
         ];
         
         const isFixed = txs[0].category === 'Bills' || txs[0].category === 'Rent' ||
@@ -509,14 +519,15 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         const desc = sortedTxs[0].description.toLowerCase();
         
         // If it's a common shopping merchant but intervals are not strictly monthly, skip
+        // Skip this check if it's already categorized as a Subscription
         const isShopping = ['amazon', 'tesco', 'sainsbury', 'asda', 'lidl', 'aldi', 'ebay', 'uber', 'bolt'].some(m => desc.includes(m));
-        if (isShopping && frequency === 'Monthly' && intervals.some(d => d < 25)) {
+        if (isShopping && frequency === 'Monthly' && intervals.some(d => d < 25) && txs[0].category !== 'Subscriptions') {
           frequency = '';
         }
 
         // Exclude retail processors if they only have a few transactions and aren't perfectly periodic
         const isRetailProcessor = RETAIL_PROCESSORS.some(p => desc.includes(p));
-        if (isRetailProcessor && txs.length < 4) {
+        if (isRetailProcessor && txs.length < 4 && txs[0].category !== 'Subscriptions') {
             frequency = '';
         }
       }
