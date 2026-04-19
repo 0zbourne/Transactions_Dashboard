@@ -41,7 +41,8 @@ import {
   ArrowLeft,
   ThumbsUp,
   ThumbsDown,
-  CheckCircle2
+  CheckCircle2,
+  ShieldCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -94,6 +95,7 @@ interface Subscription {
   lastDate: string;
   isPotential?: boolean;
   reason?: string;
+  type?: 'fixed' | 'flexible';
 }
 
 interface SavingInsight {
@@ -117,8 +119,8 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   'Shopping': ['amazon', 'amzn', 'argos', 'boots', 'next', 'zara', 'h&m', 'ebay', 'apple'],
   'Entertainment': ['netflix', 'spotify', 'disney', 'cinema', 'steam', 'playstation', 'xbox'],
   'Rent': ['rent', 'letting', 'lets', 'estate agent', 'property management', 'landlord', 'residential'],
-  'Bills': ['smarty', 'virgin media', 'bt ', 'water', 'electric', 'gas', 'council', 'insurance', 'mortgage'],
-  'Subscriptions': ['proton', 'porkbun', 'google play', 'icloud', 'adobe', 'microsoft', 'chatgpt', 'openai']
+  'Bills': ['smarty', 'virgin media', 'bt ', 'water', 'electric', 'gas', 'council', 'insurance', 'mortgage', 'rent', 'landlord'],
+  'Subscriptions': ['proton', 'porkbun', 'google play', 'icloud', 'adobe', 'microsoft', 'chatgpt', 'openai', 'netflix', 'spotify', 'gym']
 };
 
 const BANK_FORMATS = ['Barclaycard', 'Amex', 'Starling'] as const;
@@ -390,6 +392,9 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
           'disney plus', 'disney+', 'tv licence', 'council tax', 'car tax'
         ];
         
+        const isFixed = txs[0].category === 'Bills' || txs[0].category === 'Rent' ||
+                        ['rent', 'mortgage', 'council', 'water', 'electric', 'gas', 'insurance', 'tax', 'premium'].some(k => desc.includes(k));
+
         const isPotentialYearly = yearlyKeywords.some(k => desc.includes(k)) || 
                                  txs[0].category === 'Subscriptions' ||
                                  (Math.abs(avgAmount) >= 40 && ['Bills', 'Services', 'Shopping', 'Lifestyle', 'General Purchases', 'Transport'].includes(txs[0].category));
@@ -404,6 +409,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
             count: 1,
             lastDate: txs[0].date,
             isPotential: true,
+            type: isFixed ? 'fixed' : 'flexible',
             reason: txs[0].category === 'Subscriptions' ? 'Category Match' : (yearlyKeywords.some(k => desc.includes(k)) ? 'Keyword Match' : 'High Value One-off')
           });
         }
@@ -460,6 +466,14 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         }
       }
 
+      // Marketplace / Repeat Purchase Logic (Irregular)
+      if (!frequency && txs.length >= 3) {
+        const isMarketplace = ['amazon', 'ebay', 'temu', 'shein', 'apple.com', 'google', 'bolt', 'uber'].some(m => desc.includes(m));
+        if (isMarketplace) {
+          frequency = 'Irregular';
+        }
+      }
+
       // Recency check: If the last transaction was too long ago, it's likely cancelled
       if (frequency) {
         const lastTxDate = parseDate(sortedTxs[sortedTxs.length - 1].date);
@@ -492,14 +506,34 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
       }
 
       if (frequency) {
+        const desc = sortedTxs[0].description.toLowerCase();
+        const isFixed = sortedTxs[0].category === 'Bills' || sortedTxs[0].category === 'Rent' ||
+                        ['rent', 'mortgage', 'council', 'water', 'electric', 'gas', 'insurance', 'tax', 'premium'].some(k => desc.includes(k));
+
+        let annualCost = 0;
+        if (frequency === 'Monthly') annualCost = Math.abs(avgAmount) * 12;
+        else if (frequency === 'Weekly') annualCost = Math.abs(avgAmount) * 52;
+        else if (frequency === 'Yearly') annualCost = Math.abs(avgAmount);
+        else if (frequency === 'Irregular') {
+          // Extrapolate based on the time span of the existing transactions
+          const firstDate = parseDate(sortedTxs[0].date).getTime();
+          const lastDate = parseDate(sortedTxs[sortedTxs.length - 1].date).getTime();
+          const daysSpan = Math.max(1, (lastDate - firstDate) / (1000 * 60 * 60 * 24));
+          const dailyBurn = (Math.abs(avgAmount) * txs.length) / daysSpan;
+          annualCost = dailyBurn * 365;
+        }
+
         subs.push({
           id: `${sortedTxs[0].description.toLowerCase().replace(/\s+/g, '-')}-${frequency.toLowerCase()}`,
           merchant: sortedTxs[0].description,
           frequency,
           avgAmount: Math.abs(avgAmount),
-          annualCost: Math.abs(avgAmount) * (frequency === 'Monthly' ? 12 : frequency === 'Weekly' ? 52 : 1),
+          annualCost,
           count: txs.length,
-          lastDate: sortedTxs[sortedTxs.length - 1].date
+          lastDate: sortedTxs[sortedTxs.length - 1].date,
+          type: isFixed ? 'fixed' : 'flexible',
+          isPotential: frequency === 'Irregular',
+          reason: frequency === 'Irregular' ? 'Repeat Purchases' : undefined
         });
       }
     });
@@ -610,7 +644,7 @@ export default function App() {
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
   const [showHistory, setShowHistory] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
-  const [subModalFilter, setSubModalFilter] = useState<'all' | 'recurring' | 'potential'>('all');
+  const [subModalFilter, setSubModalFilter] = useState<'all' | 'recurring' | 'potential' | 'fixed' | 'flexible'>('all');
   const [confirmedSubIds, setConfirmedSubIds] = useState<Set<string>>(new Set());
   const [dismissedSubIds, setDismissedSubIds] = useState<Set<string>>(new Set());
 
@@ -1150,10 +1184,20 @@ export default function App() {
     return subscriptions.filter(s => !dismissedSubIds.has(s.id));
   }, [subscriptions, dismissedSubIds]);
 
+  const fixedObligations = useMemo(() => {
+    return activeSubscriptions.filter(s => s.type === 'fixed');
+  }, [activeSubscriptions]);
+
+  const lifestyleSubscriptions = useMemo(() => {
+    return activeSubscriptions.filter(s => s.type === 'flexible');
+  }, [activeSubscriptions]);
+
   const filteredSubscriptions = useMemo(() => {
     let list = [...subscriptions];
     if (subModalFilter === 'recurring') list = list.filter(s => !s.isPotential);
     if (subModalFilter === 'potential') list = list.filter(s => s.isPotential);
+    if (subModalFilter === 'fixed') list = list.filter(s => s.type === 'fixed');
+    if (subModalFilter === 'flexible') list = list.filter(s => s.type === 'flexible');
     
     // Sort confirmed items to the top, dismissed to bottom
     return list.sort((a, b) => {
@@ -1474,6 +1518,26 @@ export default function App() {
                   >
                     Potential Yearly ({subscriptions.filter(s => s.isPotential).length})
                   </button>
+                  <div className="w-[1px] h-4 bg-gray-800 mx-1" />
+                  <button
+                    onClick={() => setSubModalFilter('fixed')}
+                    className={cn(
+                      "flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-medium transition-all",
+                      subModalFilter === 'fixed' ? "bg-emerald-600 text-white shadow-lg shadow-emerald-900/20" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    )}
+                  >
+                    <ShieldCheck size={12} />
+                    Fixed ({subscriptions.filter(s => s.type === 'fixed').length})
+                  </button>
+                  <button
+                    onClick={() => setSubModalFilter('flexible')}
+                    className={cn(
+                      "flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-medium transition-all",
+                      subModalFilter === 'flexible' ? "bg-amber-600 text-white shadow-lg shadow-amber-900/20" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    )}
+                  >
+                    Lifestyle ({subscriptions.filter(s => s.type === 'flexible').length})
+                  </button>
                 </div>
               </div>
               
@@ -1584,28 +1648,49 @@ export default function App() {
                       <p>Payments must have a consistent amount (within 15% tolerance) to be considered a subscription.</p>
                     </div>
                     <div className="space-y-2">
-                      <p className="font-medium text-gray-300">3. Smart Filtering</p>
-                      <p>We automatically include items in the "Subscriptions" category and scan for high-value services or billing keywords.</p>
+                      <p className="font-medium text-gray-300">3. Marketplace Intelligence</p>
+                      <p>For shops like Amazon or eBay, we identify "Repeat Purchases" based on amount frequency, even if the dates are irregular.</p>
                     </div>
                   </div>
                 </div>
               </div>
               
-              <div className="p-6 bg-[#252525] border-t border-gray-800 flex items-center justify-between">
-                <div className="flex items-baseline gap-2">
-                  <span className="text-sm text-gray-400">Total Annual Subscription Spend:</span>
-                  <span className="text-xl font-bold text-amber-400">
-                    {formatCurrency(subscriptions.reduce((sum, s) => {
-                      if (dismissedSubIds.has(s.id)) return sum;
-                      return sum + s.annualCost;
-                    }, 0))}
-                  </span>
+              <div className="p-6 bg-[#252525] border-t border-gray-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div className="flex flex-wrap gap-x-8 gap-y-4">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase tracking-wider font-bold">Annual Fixed Obligations</span>
+                    <span className="text-xl font-bold text-emerald-400">
+                      {formatCurrency(subscriptions.reduce((sum, s) => {
+                        if (dismissedSubIds.has(s.id) || s.type !== 'fixed') return sum;
+                        return sum + s.annualCost;
+                      }, 0))}
+                    </span>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase tracking-wider font-bold">Annual Lifestyle Subscriptions</span>
+                    <span className="text-xl font-bold text-amber-400">
+                      {formatCurrency(subscriptions.reduce((sum, s) => {
+                        if (dismissedSubIds.has(s.id) || s.type !== 'flexible') return sum;
+                        return sum + s.annualCost;
+                      }, 0))}
+                    </span>
+                  </div>
+                  <div className="hidden md:block w-[1px] h-10 bg-gray-800" />
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase tracking-wider font-bold">Total Commitment</span>
+                    <span className="text-xl font-black text-white">
+                      {formatCurrency(subscriptions.reduce((sum, s) => {
+                        if (dismissedSubIds.has(s.id)) return sum;
+                        return sum + s.annualCost;
+                      }, 0))}
+                    </span>
+                  </div>
                 </div>
                 <button 
                   onClick={() => setShowSubscriptionModal(false)}
-                  className="px-6 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors text-sm font-medium"
+                  className="px-8 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl transition-all shadow-lg shadow-indigo-900/20 text-sm font-bold"
                 >
-                  Close
+                  Close Manager
                 </button>
               </div>
             </motion.div>
@@ -2248,28 +2333,74 @@ export default function App() {
           </section>
         )}
 
-        {/* Subscription Hunter */}
-        {subscriptions.length > 0 && (
+        {/* Fixed Obligations & Bills */}
+        {fixedObligations.length > 0 && (
           <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl overflow-hidden">
             <div className="p-6 border-b border-gray-800 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <RefreshCcw size={18} className="text-amber-400" />
-                <h2 className="text-lg font-semibold">Detected Subscriptions</h2>
+                <ShieldCheck size={18} className="text-emerald-400" />
+                <h2 className="text-lg font-semibold">Fixed Obligations & Bills</h2>
               </div>
               <div className="flex items-center gap-3">
                 <button 
-                  onClick={() => setShowSubscriptionModal(true)}
-                  className="text-xs text-amber-400 hover:text-amber-300 font-medium transition-colors"
+                  onClick={() => {
+                    setSubModalFilter('fixed');
+                    setShowSubscriptionModal(true);
+                  }}
+                  className="text-xs text-emerald-400 hover:text-emerald-300 font-medium transition-colors"
                 >
-                  View All ({activeSubscriptions.length})
+                  View All ({fixedObligations.length})
                 </button>
-                <span className="text-xs bg-amber-900/30 text-amber-400 px-2 py-1 rounded border border-amber-900/50">
-                  AI Detected
+                <span className="text-xs bg-emerald-900/30 text-emerald-400 px-2 py-1 rounded border border-emerald-900/50">
+                  Committed Spend
                 </span>
               </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-gray-800">
-              {activeSubscriptions.slice(0, 4).map((sub, i) => (
+              {fixedObligations.slice(0, 4).map((sub, i) => (
+                <div key={i} className="p-6 space-y-3">
+                  <p className="text-sm text-gray-400 font-medium truncate" title={sub.merchant}>{sub.merchant}</p>
+                  <div className="flex items-end justify-between">
+                    <div>
+                      <p className="text-xl font-bold">{formatCurrency(sub.annualCost / 12)}</p>
+                      <p className="text-xs text-gray-500">Avg. Monthly</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-semibold text-emerald-400">{formatCurrency(sub.annualCost)}</p>
+                      <p className="text-xs text-gray-500">Annual Cost</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Subscription Hunter */}
+        {lifestyleSubscriptions.length > 0 && (
+          <section className="bg-[#1e1e1e] border border-gray-800 rounded-xl overflow-hidden">
+            <div className="p-6 border-b border-gray-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <RefreshCcw size={18} className="text-amber-400" />
+                <h2 className="text-lg font-semibold">Lifestyle Subscriptions</h2>
+              </div>
+              <div className="flex items-center gap-3">
+                <button 
+                  onClick={() => {
+                    setSubModalFilter('flexible');
+                    setShowSubscriptionModal(true);
+                  }}
+                  className="text-xs text-amber-400 hover:text-amber-300 font-medium transition-colors"
+                >
+                  View All ({lifestyleSubscriptions.length})
+                </button>
+                <span className="text-xs bg-amber-900/30 text-amber-400 px-2 py-1 rounded border border-amber-900/50">
+                  Flexible Spend
+                </span>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-gray-800">
+              {lifestyleSubscriptions.slice(0, 4).map((sub, i) => (
                 <div key={i} className="p-6 space-y-3">
                   <p className="text-sm text-gray-400 font-medium truncate" title={sub.merchant}>{sub.merchant}</p>
                   <div className="flex items-end justify-between">
@@ -2284,11 +2415,6 @@ export default function App() {
                   </div>
                 </div>
               ))}
-              {activeSubscriptions.length === 0 && (
-                <div className="col-span-full p-8 text-center">
-                  <p className="text-gray-500 text-sm italic">No subscriptions detected or all items dismissed.</p>
-                </div>
-              )}
             </div>
           </section>
         )}
