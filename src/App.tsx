@@ -120,7 +120,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   'Entertainment': ['netflix', 'spotify', 'disney', 'cinema', 'steam', 'playstation', 'xbox'],
   'Rent': ['rent', 'letting', 'lets', 'estate agent', 'property management', 'landlord', 'residential'],
   'Bills': ['smarty', 'virgin media', 'bt ', 'water', 'electric', 'gas', 'council', 'insurance', 'mortgage', 'rent', 'landlord'],
-  'Subscriptions': ['proton', 'porkbun', 'google play', 'icloud', 'adobe', 'microsoft', 'chatgpt', 'openai', 'netflix', 'spotify', 'gym']
+  'Subscriptions': ['proton', 'porkbun', 'google play', 'icloud', 'adobe', 'microsoft', 'chatgpt', 'openai', 'netflix', 'spotify', 'gym', 'youtube', 'premium', 'hulu', 'disney', 'prime']
 };
 
 const BANK_FORMATS = ['Barclaycard', 'Amex', 'Starling'] as const;
@@ -297,9 +297,11 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
   }, parseDate(transactions[0].date));
 
   // Processors that are strictly retail (unlikely to be subscriptions)
-  const RETAIL_PROCESSORS = ['dojo', 'iz *', 'zettle', 'sumup', 'square', 'apple pay', 'google pay'];
+  const RETAIL_PROCESSORS = ['dojo', 'iz *', 'zettle', 'sumup', 'square'];
   // Processors that are common for both retail AND subscriptions
-  const HYBRID_PROCESSORS = ['stripe', 'paypal', 'amzn mktp', 'amazon.co.uk', 'google play'];
+  const HYBRID_PROCESSORS = ['stripe', 'paypal', 'amzn mktp', 'amazon.co.uk', 'google play', 'google pay', 'apple pay', 'apple.com'];
+  // Significant words that should trigger a merge even if processors differ
+  const HUB_KEYWORDS = ['youtube', 'netflix', 'spotify', 'disney', 'amazon', 'apple', 'google', 'microsoft', 'adobe', 'icloud', 'chatgpt', 'openai'];
 
   transactions.forEach(t => {
     if (t.amount >= 0) return; // Only spending
@@ -348,13 +350,16 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
       const common = words1.filter(w => words2.includes(w));
       
       // Merge if they share a significant word (not a processor, not too short)
+      // OR if they share a "Hub" keyword (like YouTube)
+      const hasHubKeywordMatch = HUB_KEYWORDS.some(k => groupKeys[i].includes(k) && groupKeys[j].includes(k));
+      
       const significantCommon = common.filter(w => 
         w.length > 3 && 
-        !RETAIL_PROCESSORS.includes(w) && 
-        !HYBRID_PROCESSORS.includes(w)
+        !RETAIL_PROCESSORS.some(rp => rp === w || rp.startsWith(w + ' ')) && 
+        !HYBRID_PROCESSORS.some(hp => hp === w || hp.startsWith(w + ' '))
       );
       
-      if (significantCommon.length > 0) {
+      if (hasHubKeywordMatch || significantCommon.length > 0) {
         currentCluster.push(...groups[groupKeys[j]]);
         processedKeys.add(groupKeys[j]);
       }
@@ -466,10 +471,10 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         }
       }
 
-      // Marketplace / Repeat Purchase Logic (Irregular) - Restricted to Amazon
+      // Marketplace / Repeat Purchase Logic (Irregular) - Amazon & App Ecosystems
       if (!frequency && txs.length >= 4) {
-        const isAmazon = desc.includes('amazon');
-        if (isAmazon) {
+        const isMarketplace = ['amazon', 'apple.com', 'google'].some(m => desc.includes(m));
+        if (isMarketplace) {
           frequency = 'Irregular';
         }
       }
@@ -480,6 +485,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         const daysSinceLastTx = Math.round((latestDataDate.getTime() - lastTxDate.getTime()) / (1000 * 60 * 60 * 24));
         
         let threshold = 45;
+        if (frequency === 'Monthly') threshold = 55; // More breathing room for monthly
         if (frequency === 'Weekly') threshold = 14;
         if (frequency === 'Yearly') threshold = 400;
         if (frequency === 'Irregular') threshold = 90; // Higher threshold for irregular repeats
@@ -490,6 +496,15 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
       }
 
       // Final checks
+      if (!frequency && txs[0].category === 'Subscriptions') {
+        // If no frequency was found but it's categorized as a subscription,
+        // treat it as a potential irregular/special subscription
+        frequency = 'Monthly'; // Assume monthly for cost estimation unless we know better
+        const lastDate = parseDate(sortedTxs[sortedTxs.length - 1].date);
+        const daysSince = Math.round((latestDataDate.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+        if (daysSince > 65) frequency = ''; // Still kill it if it's very old
+      }
+
       if (frequency) {
         const desc = sortedTxs[0].description.toLowerCase();
         
@@ -525,7 +540,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         }
 
         subs.push({
-          id: `${sortedTxs[0].description.toLowerCase().replace(/\s+/g, '-')}-${frequency.toLowerCase()}`,
+          id: `${sortedTxs[0].description.toLowerCase().replace(/[^a-z]/g, '-')}-${frequency.toLowerCase()}-${Math.abs(avgAmount).toFixed(0)}`,
           merchant: sortedTxs[0].description,
           frequency,
           avgAmount: Math.abs(avgAmount),
@@ -533,8 +548,9 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
           count: txs.length,
           lastDate: sortedTxs[sortedTxs.length - 1].date,
           type: isFixed ? 'fixed' : 'flexible',
-          isPotential: frequency === 'Irregular',
-          reason: frequency === 'Irregular' ? 'Repeat Purchases' : undefined
+          // If it's already categorized as a subscription and we found a frequency, it's not "potential", it's confirmed recurring
+          isPotential: frequency === 'Irregular' && sortedTxs[0].category !== 'Subscriptions',
+          reason: sortedTxs[0].category === 'Subscriptions' ? 'Category Match' : (frequency === 'Irregular' ? 'Repeat Purchases' : undefined)
         });
       }
     });
