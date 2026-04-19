@@ -391,7 +391,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         ];
         
         const isPotentialYearly = yearlyKeywords.some(k => desc.includes(k)) || 
-                                 (Math.abs(avgAmount) >= 50 && ['Bills', 'Services', 'Shopping', 'Lifestyle', 'General Purchases', 'Transport'].includes(txs[0].category));
+                                 (Math.abs(avgAmount) >= 40 && ['Bills', 'Services', 'Shopping', 'Lifestyle', 'General Purchases', 'Transport'].includes(txs[0].category));
 
         if (isPotentialYearly && txs[0].category !== 'Transfer' && txs[0].amount < 0) {
           subs.push({
@@ -1145,6 +1145,10 @@ export default function App() {
 
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
+  const activeSubscriptions = useMemo(() => {
+    return subscriptions.filter(s => !dismissedSubIds.has(s.id));
+  }, [subscriptions, dismissedSubIds]);
+
   const filteredSubscriptions = useMemo(() => {
     let list = [...subscriptions];
     if (subModalFilter === 'recurring') list = list.filter(s => !s.isPotential);
@@ -1167,9 +1171,9 @@ export default function App() {
   }, [subscriptions, subModalFilter, confirmedSubIds, dismissedSubIds]);
 
   const savingsInsights = useMemo(() => {
-    const baseInsights = generateSavingInsights(allTransactions, subscriptions);
+    const baseInsights = generateSavingInsights(allTransactions, activeSubscriptions);
     return [...baseInsights, ...aiInsights];
-  }, [allTransactions, subscriptions, aiInsights]);
+  }, [allTransactions, activeSubscriptions, aiInsights]);
 
   const totalPotentialSavings = useMemo(() => {
     return savingsInsights.reduce((sum, i) => sum + i.potentialSaving, 0);
@@ -2256,7 +2260,7 @@ export default function App() {
                   onClick={() => setShowSubscriptionModal(true)}
                   className="text-xs text-amber-400 hover:text-amber-300 font-medium transition-colors"
                 >
-                  View All ({subscriptions.length})
+                  View All ({activeSubscriptions.length})
                 </button>
                 <span className="text-xs bg-amber-900/30 text-amber-400 px-2 py-1 rounded border border-amber-900/50">
                   AI Detected
@@ -2264,12 +2268,12 @@ export default function App() {
               </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-gray-800">
-              {subscriptions.slice(0, 4).map((sub, i) => (
+              {activeSubscriptions.slice(0, 4).map((sub, i) => (
                 <div key={i} className="p-6 space-y-3">
                   <p className="text-sm text-gray-400 font-medium truncate" title={sub.merchant}>{sub.merchant}</p>
                   <div className="flex items-end justify-between">
                     <div>
-                      <p className="text-xl font-bold">{formatCurrency(sub.avgAmount)}</p>
+                      <p className="text-xl font-bold">{formatCurrency(sub.annualCost / 12)}</p>
                       <p className="text-xs text-gray-500">Avg. Monthly</p>
                     </div>
                     <div className="text-right">
@@ -2279,6 +2283,11 @@ export default function App() {
                   </div>
                 </div>
               ))}
+              {activeSubscriptions.length === 0 && (
+                <div className="col-span-full p-8 text-center">
+                  <p className="text-gray-500 text-sm italic">No subscriptions detected or all items dismissed.</p>
+                </div>
+              )}
             </div>
           </section>
         )}
