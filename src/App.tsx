@@ -88,6 +88,8 @@ interface Subscription {
   annualCost: number;
   count: number;
   lastDate: string;
+  isPotential?: boolean;
+  reason?: string;
 }
 
 interface SavingInsight {
@@ -373,7 +375,34 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
     });
 
     amountClusters.forEach(txs => {
-      if (txs.length < 2) return;
+      let avgAmount = txs.reduce((sum, t) => sum + t.amount, 0) / txs.length;
+      const desc = txs[0].description.toLowerCase();
+      
+      if (txs.length < 2) {
+        // Potential Yearly Subscription Check for single transactions
+        const yearlyKeywords = [
+          'annual', 'yearly', 'membership', 'insurance', 'tax', 'premium', 
+          'subscription', 'renew', 'renewal', 'license', 'amazon prime', 
+          'disney plus', 'disney+', 'tv licence', 'council tax', 'car tax'
+        ];
+        
+        const isPotentialYearly = yearlyKeywords.some(k => desc.includes(k)) || 
+                                 (Math.abs(avgAmount) >= 50 && ['Bills', 'Services', 'Shopping', 'Lifestyle'].includes(txs[0].category));
+
+        if (isPotentialYearly && txs[0].category !== 'Transfer' && txs[0].amount < 0) {
+          subs.push({
+            merchant: txs[0].description,
+            frequency: 'Yearly',
+            avgAmount: Math.abs(avgAmount),
+            annualCost: Math.abs(avgAmount),
+            count: 1,
+            lastDate: txs[0].date,
+            isPotential: true,
+            reason: yearlyKeywords.some(k => desc.includes(k)) ? 'Keyword Match' : 'High Value One-off'
+          });
+        }
+        return;
+      }
       
       // Sort by date
       const sortedTxs = [...txs].sort((a, b) => {
@@ -391,7 +420,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         intervals.push(diffDays);
       }
 
-      const avgAmount = txs.reduce((sum, t) => sum + t.amount, 0) / txs.length;
+      avgAmount = txs.reduce((sum, t) => sum + t.amount, 0) / txs.length;
       
       // Detect frequency based on intervals
       let frequency = '';
@@ -574,6 +603,7 @@ export default function App() {
   const [sortConfig, setSortConfig] = useState<{ key: keyof Transaction, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
   const [showHistory, setShowHistory] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
+  const [subModalFilter, setSubModalFilter] = useState<'all' | 'recurring' | 'potential'>('all');
   const [showSavingsModal, setShowSavingsModal] = useState(false);
   const [selectedInsightId, setSelectedInsightId] = useState<string | null>(null);
   const [aiInsights, setAiInsights] = useState<SavingInsight[]>([]);
@@ -1072,6 +1102,12 @@ export default function App() {
 
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
+  const filteredSubscriptions = useMemo(() => {
+    if (subModalFilter === 'recurring') return subscriptions.filter(s => !s.isPotential);
+    if (subModalFilter === 'potential') return subscriptions.filter(s => s.isPotential);
+    return subscriptions;
+  }, [subscriptions, subModalFilter]);
+
   const savingsInsights = useMemo(() => {
     const baseInsights = generateSavingInsights(allTransactions, subscriptions);
     return [...baseInsights, ...aiInsights];
@@ -1328,45 +1364,92 @@ export default function App() {
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
               className="relative w-full max-w-4xl bg-[#1e1e1e] border border-gray-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
-              <div className="p-6 border-b border-gray-800 flex items-center justify-between bg-[#1e1e1e] z-10">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-amber-500/10 rounded-lg">
-                    <RefreshCcw size={24} className="text-amber-400" />
+              <div className="p-6 border-b border-gray-800 bg-[#1e1e1e] space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-amber-500/10 rounded-lg">
+                      <RefreshCcw size={24} className="text-amber-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold text-white">Detected Subscriptions</h3>
+                      <p className="text-xs text-gray-500 mt-1">Recurring payments identified across your statements</p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="text-xl font-bold text-white">Detected Subscriptions</h3>
-                    <p className="text-xs text-gray-500 mt-1">Recurring payments identified across your statements</p>
-                  </div>
+                  <button 
+                    onClick={() => setShowSubscriptionModal(false)}
+                    className="p-2 hover:bg-gray-800 rounded-lg transition-colors text-gray-400 hover:text-white"
+                  >
+                    <X size={20} />
+                  </button>
                 </div>
-                <button 
-                  onClick={() => setShowSubscriptionModal(false)}
-                  className="p-2 hover:bg-gray-800 rounded-lg transition-colors text-gray-400 hover:text-white"
-                >
-                  <X size={20} />
-                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setSubModalFilter('all')}
+                    className={cn(
+                      "px-4 py-1.5 rounded-full text-xs font-medium transition-all",
+                      subModalFilter === 'all' ? "bg-amber-600 text-white shadow-lg shadow-amber-900/20" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    )}
+                  >
+                    All ({subscriptions.length})
+                  </button>
+                  <button
+                    onClick={() => setSubModalFilter('recurring')}
+                    className={cn(
+                      "px-4 py-1.5 rounded-full text-xs font-medium transition-all",
+                      subModalFilter === 'recurring' ? "bg-amber-600 text-white shadow-lg shadow-amber-900/20" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    )}
+                  >
+                    Recurring ({subscriptions.filter(s => !s.isPotential).length})
+                  </button>
+                  <button
+                    onClick={() => setSubModalFilter('potential')}
+                    className={cn(
+                      "flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-medium transition-all",
+                      subModalFilter === 'potential' ? "bg-amber-600 text-white shadow-lg shadow-amber-900/20" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                    )}
+                  >
+                    Potential Yearly ({subscriptions.filter(s => s.isPotential).length})
+                  </button>
+                </div>
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-                  {subscriptions.map((sub, i) => (
-                    <div key={i} className="bg-[#252525] border border-gray-800 rounded-xl p-5 hover:border-amber-500/30 transition-colors group">
+                  {filteredSubscriptions.map((sub, i) => (
+                    <div key={i} className={cn(
+                      "bg-[#252525] border rounded-xl p-5 hover:border-amber-500/30 transition-colors group relative overflow-hidden",
+                      sub.isPotential ? "border-indigo-900/30" : "border-gray-800"
+                    )}>
+                      {sub.isPotential && (
+                        <div className="absolute top-0 right-0 px-2 py-0.5 bg-indigo-600/20 text-[8px] font-bold text-indigo-400 rounded-bl-lg border-l border-b border-indigo-900/50">
+                          POTENTIAL {sub.reason?.toUpperCase()}
+                        </div>
+                      )}
                       <div className="flex justify-between items-start mb-4">
                         <div className="space-y-1">
                           <p className="text-sm font-bold text-white group-hover:text-amber-400 transition-colors truncate max-w-[200px]" title={sub.merchant}>
                             {sub.merchant}
                           </p>
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 rounded border border-gray-700">
+                            <span className={cn(
+                              "text-[10px] px-1.5 py-0.5 rounded border",
+                              sub.isPotential ? "bg-indigo-900/20 text-indigo-400 border-indigo-800" : "bg-gray-800 text-gray-400 border-gray-700"
+                            )}>
                               {sub.frequency}
                             </span>
                             <span className="text-[10px] text-gray-500">
-                              {sub.count} occurrences • Last: {sub.lastDate}
+                              {sub.count} {sub.count === 1 ? 'occurrence' : 'occurrences'} • Last: {sub.lastDate}
                             </span>
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-lg font-bold text-white">{formatCurrency(sub.avgAmount)}</p>
-                          <p className="text-[10px] text-gray-500">per {sub.frequency.toLowerCase().replace('ly', '')}</p>
+                          <p className={cn("text-lg font-bold", sub.isPotential ? "text-indigo-300" : "text-white")}>
+                            {formatCurrency(sub.avgAmount)}
+                          </p>
+                          <p className="text-[10px] text-gray-500">
+                            {sub.frequency === 'Yearly' ? 'per year' : sub.frequency === 'Weekly' ? 'per week' : 'per month'}
+                          </p>
                         </div>
                       </div>
                       
@@ -1376,6 +1459,12 @@ export default function App() {
                       </div>
                     </div>
                   ))}
+
+                  {filteredSubscriptions.length === 0 && (
+                    <div className="col-span-full py-12 text-center bg-[#252525]/50 border border-dashed border-gray-800 rounded-xl">
+                      <p className="text-gray-500 text-sm">No items matching this filter.</p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Logic Explanation */}
