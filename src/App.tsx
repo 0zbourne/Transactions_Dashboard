@@ -38,7 +38,10 @@ import {
   Info,
   X,
   Sparkles,
-  ArrowLeft
+  ArrowLeft,
+  ThumbsUp,
+  ThumbsDown,
+  CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -82,6 +85,7 @@ interface UploadLog {
 }
 
 interface Subscription {
+  id: string;
   merchant: string;
   frequency: string;
   avgAmount: number;
@@ -387,10 +391,11 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
         ];
         
         const isPotentialYearly = yearlyKeywords.some(k => desc.includes(k)) || 
-                                 (Math.abs(avgAmount) >= 50 && ['Bills', 'Services', 'Shopping', 'Lifestyle'].includes(txs[0].category));
+                                 (Math.abs(avgAmount) >= 50 && ['Bills', 'Services', 'Shopping', 'Lifestyle', 'General Purchases', 'Transport'].includes(txs[0].category));
 
         if (isPotentialYearly && txs[0].category !== 'Transfer' && txs[0].amount < 0) {
           subs.push({
+            id: `${desc}-${Math.abs(avgAmount).toFixed(0)}-yearly`,
             merchant: txs[0].description,
             frequency: 'Yearly',
             avgAmount: Math.abs(avgAmount),
@@ -487,6 +492,7 @@ function detectSubscriptions(transactions: Transaction[]): Subscription[] {
 
       if (frequency) {
         subs.push({
+          id: `${sortedTxs[0].description.toLowerCase().replace(/\s+/g, '-')}-${frequency.toLowerCase()}`,
           merchant: sortedTxs[0].description,
           frequency,
           avgAmount: Math.abs(avgAmount),
@@ -604,6 +610,43 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
   const [subModalFilter, setSubModalFilter] = useState<'all' | 'recurring' | 'potential'>('all');
+  const [confirmedSubIds, setConfirmedSubIds] = useState<Set<string>>(new Set());
+  const [dismissedSubIds, setDismissedSubIds] = useState<Set<string>>(new Set());
+
+  const toggleConfirmSub = (id: string) => {
+    setConfirmedSubIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else {
+        next.add(id);
+        // Remove from dismissed if it was there
+        setDismissedSubIds(d => {
+          const n = new Set(d);
+          n.delete(id);
+          return n;
+        });
+      }
+      return next;
+    });
+  };
+
+  const toggleDismissSub = (id: string) => {
+    setDismissedSubIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else {
+        next.add(id);
+        // Remove from confirmed if it was there
+        setConfirmedSubIds(c => {
+          const n = new Set(c);
+          n.delete(id);
+          return n;
+        });
+      }
+      return next;
+    });
+  };
+
   const [showSavingsModal, setShowSavingsModal] = useState(false);
   const [selectedInsightId, setSelectedInsightId] = useState<string | null>(null);
   const [aiInsights, setAiInsights] = useState<SavingInsight[]>([]);
@@ -1103,10 +1146,25 @@ export default function App() {
   const subscriptions = useMemo(() => detectSubscriptions(allTransactions), [allTransactions]);
 
   const filteredSubscriptions = useMemo(() => {
-    if (subModalFilter === 'recurring') return subscriptions.filter(s => !s.isPotential);
-    if (subModalFilter === 'potential') return subscriptions.filter(s => s.isPotential);
-    return subscriptions;
-  }, [subscriptions, subModalFilter]);
+    let list = [...subscriptions];
+    if (subModalFilter === 'recurring') list = list.filter(s => !s.isPotential);
+    if (subModalFilter === 'potential') list = list.filter(s => s.isPotential);
+    
+    // Sort confirmed items to the top, dismissed to bottom
+    return list.sort((a, b) => {
+      const aC = confirmedSubIds.has(a.id);
+      const bC = confirmedSubIds.has(b.id);
+      if (aC && !bC) return -1;
+      if (!aC && bC) return 1;
+      
+      const aD = dismissedSubIds.has(a.id);
+      const bD = dismissedSubIds.has(b.id);
+      if (aD && !bD) return 1;
+      if (!aD && bD) return -1;
+      
+      return 0;
+    });
+  }, [subscriptions, subModalFilter, confirmedSubIds, dismissedSubIds]);
 
   const savingsInsights = useMemo(() => {
     const baseInsights = generateSavingInsights(allTransactions, subscriptions);
@@ -1454,8 +1512,46 @@ export default function App() {
                       </div>
                       
                       <div className="pt-4 border-t border-gray-800 flex items-center justify-between">
-                        <span className="text-xs text-gray-400">Estimated Annual Cost</span>
-                        <span className="text-sm font-bold text-amber-400">{formatCurrency(sub.annualCost)}</span>
+                        <div className="flex items-center gap-2">
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); toggleConfirmSub(sub.id); }}
+                            className={cn(
+                              "p-1.5 rounded-lg border transition-all",
+                              confirmedSubIds.has(sub.id) 
+                                ? "bg-green-500/20 border-green-500 text-green-400" 
+                                : "bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300"
+                            )}
+                            title="Confirm this is a subscription"
+                          >
+                            <ThumbsUp size={14} />
+                          </button>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); toggleDismissSub(sub.id); }}
+                            className={cn(
+                              "p-1.5 rounded-lg border transition-all",
+                              dismissedSubIds.has(sub.id) 
+                                ? "bg-red-500/20 border-red-500 text-red-400" 
+                                : "bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300"
+                            )}
+                            title="This is not a subscription"
+                          >
+                            <ThumbsDown size={14} />
+                          </button>
+                          {confirmedSubIds.has(sub.id) && (
+                            <span className="text-[10px] text-green-400 font-bold flex items-center gap-1">
+                              <CheckCircle2 size={10} /> Confirmed
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs text-gray-400">Estimated Annual Cost</p>
+                          <span className={cn(
+                            "text-sm font-bold",
+                            dismissedSubIds.has(sub.id) ? "text-gray-600 line-through" : "text-amber-400"
+                          )}>
+                            {formatCurrency(sub.annualCost)}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -1494,7 +1590,10 @@ export default function App() {
                 <div className="flex items-baseline gap-2">
                   <span className="text-sm text-gray-400">Total Annual Subscription Spend:</span>
                   <span className="text-xl font-bold text-amber-400">
-                    {formatCurrency(subscriptions.reduce((sum, s) => sum + s.annualCost, 0))}
+                    {formatCurrency(subscriptions.reduce((sum, s) => {
+                      if (dismissedSubIds.has(s.id)) return sum;
+                      return sum + s.annualCost;
+                    }, 0))}
                   </span>
                 </div>
                 <button 
